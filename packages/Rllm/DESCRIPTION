@@ -14,10 +14,11 @@ Description: The composition layer of the 'Rfmalloc' ecosystem: it registers
     larger-than-memory model's linear layers be multiplied through 'GGML's
     SIMD-accelerated dot kernels zero-copy from the original model mapping.
     Typed semantic programs written through an R module-and-pipe architecture
-    language describe llama, Qwen3.5, LFM2MoE, EmbeddingGemma, ESM-2, Evo 2
-    and Tiny Recursive Models. Bound programs join those serializable graphs
-    to mapped parameter storage. Implemented lowerings provide persistent
-    state, pooled embeddings, byte-level generation, and CPU or optional CUDA
+    language describe llama, Qwen3.5, LFM2MoE, EmbeddingGemma, ESM-2,
+    OpenSpliceAI, Evo 2 and Tiny Recursive Models. Bound programs join those
+    serializable graphs to mapped parameter storage. Implemented lowerings
+    provide persistent state, pooled embeddings, byte-level generation, and
+    CPU or optional CUDA
     execution; a reference interpreter executes the same dataflow through
     explicit R operator tables and structured recurrence.
 License: GPL (>= 2)

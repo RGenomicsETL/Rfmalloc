@@ -410,8 +410,9 @@ print.rllm_program <- function(x, ...) {
 #' The built-in dense reference vocabulary covers arithmetic, normalization,
 #' pooling, activations and recurrence helpers. It also covers ESM token
 #' dropout, key-padded rotary attention with attention-map results, tied
-#' projection and contact regression. Entries in `operators` replace
-#' built-ins with the same name.
+#' projection and contact regression, plus the dilated convolution, inference
+#' batch normalization, cropping and softmax used by OpenSpliceAI. Entries in
+#' `operators` replace built-ins with the same name.
 #'
 #' @param program A data-only `rllm_program`.
 #' @param inputs A named list of input values. Extra entries remain available
@@ -753,6 +754,11 @@ rllm_execute <- function(program, inputs, parameters = list(), counts = list(),
         attention = .rllm_execute_esm_attention,
         tied_projection = .rllm_execute_tied_projection,
         esm_contact_head = .rllm_execute_esm_contact,
+        conv1d = .rllm_execute_conv1d,
+        batch_norm = .rllm_execute_batch_norm,
+        leaky_relu = .rllm_execute_leaky_relu,
+        crop1d = .rllm_execute_crop1d,
+        softmax = .rllm_execute_softmax,
         pool = .rllm_execute_pool,
         gelu = unary(function(x) x * stats::pnorm(x)),
         silu = unary(function(x) x * stats::plogis(x)),

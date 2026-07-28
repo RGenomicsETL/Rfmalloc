@@ -42,12 +42,21 @@
 
 - Added a direct ESM-2 GGUF adapter and dense semantic execution for token
   dropout, key-padded NEOX attention with attention-map results, tied
-  projection and contact regression. `tools/convert_esm2.py` writes the
-  official `fair-esm` ESM-2 8M checkpoint as 106 unmodified F32 GGUF tensors.
+  projection and contact regression. `tools/convert_esm2.R` reads the official
+  ESM-2 8M safetensors checkpoint and writes its 106 unmodified F32 tensors
+  through Rgguf's upstream GGUF implementation.
   Its 69-node program matches upstream logits, representations, attention
   probabilities and contacts on a fixed protein. Native GGML execution rejects
   the unsupported two-input grammar explicitly instead of selecting a hidden
   model-family path.
+
+- Added an OpenSpliceAI GGUF adapter and dense semantic program for dilated
+  one-dimensional convolution, inference batch normalization, leaky ReLU,
+  residual and accumulated skip paths, context cropping and per-position
+  softmax. The converter uses Python only to unwrap an upstream PyTorch state
+  dictionary into safetensors, then writes 56 F32 tensors through Rgguf. The
+  complete output of the MANE 80 nt rs10 checkpoint matches upstream PyTorch
+  within 5e-7; unsupported native GGML lowering remains an explicit failure.
 
 - GGUF metadata is normalized into semantic programs for llama, LFM2MoE and
   EmbeddingGemma before any weight is borrowed. The model-neutral lowerer

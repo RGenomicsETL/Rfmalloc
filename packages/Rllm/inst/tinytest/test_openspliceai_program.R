@@ -1,0 +1,99 @@
+library(tinytest)
+library(Rllm)
+
+program <- Rllm:::.rllm_openspliceai_program(
+    n_block = 4L, n_embd = 4L, n_input = 4L, n_output = 3L,
+    context_length = 16L,
+    kernel_size = rep.int(3L, 4L), dilation = rep.int(1L, 4L),
+    batch_norm_eps = 1e-5, leaky_relu_slope = 0.1
+)
+expect_equal(program$name, "openspliceai")
+expect_equal(length(program$parameters), 56L)
+expect_equal(
+    sort(unique(vapply(program$nodes, `[[`, character(1), "op"))),
+    sort(c(
+        "input", "conv1d", "batch_norm", "leaky_relu", "add",
+        "crop1d", "softmax"
+    ))
+)
+
+set.seed(271L)
+parameters <- lapply(program$parameters, function(parameter) {
+    values <- rnorm(prod(parameter$shape), sd = 0.15)
+    if (endsWith(parameter$name, ".running_var")) {
+        values <- runif(length(values), 0.5, 1.5)
+    } else if (grepl("batchnorm[12]\\.weight$", parameter$name)) {
+        values <- 1 + values
+    }
+    if (length(parameter$shape) > 1L) dim(values) <- parameter$shape
+    values
+})
+sequence <- array(rnorm(4L * 24L * 2L), dim = c(4L, 24L, 2L))
+result <- rllm_execute(
+    program, list(sequence = sequence), parameters = parameters
+)
+expect_equal(dim(result$probabilities), c(3L, 8L, 2L))
+expect_true(all(is.finite(result$probabilities)))
+expect_equal(
+    apply(result$probabilities, c(2L, 3L), sum),
+    matrix(1, nrow = 8L, ncol = 2L), tolerance = 1e-12
+)
+
+changed <- sequence
+changed[1L, 12L, 1L] <- changed[1L, 12L, 1L] + 1
+changed_result <- rllm_execute(
+    program, list(sequence = changed), parameters = parameters
+)
+expect_false(isTRUE(all.equal(
+    changed_result$probabilities, result$probabilities
+)))
+
+metadata <- list(
+    general.architecture = "openspliceai",
+    openspliceai.block_count = 4L,
+    openspliceai.embedding_length = 4L,
+    openspliceai.input_channel_count = 4L,
+    openspliceai.output_channel_count = 3L,
+    openspliceai.context_length = 16L,
+    openspliceai.convolution.kernel_size = rep.int(3L, 4L),
+    openspliceai.convolution.dilation = rep.int(1L, 4L),
+    openspliceai.batch_norm_epsilon = 1e-5,
+    openspliceai.leaky_relu_slope = 0.1
+)
+path <- tempfile(fileext = ".gguf")
+Rgguf::gguf_write_tensors(path, parameters, metadata)
+adapted <- rllm_program(path)
+expect_equal(names(adapted$parameters), names(program$parameters))
+directory <- Rgguf::gguf_tensors(path)
+bad_schedule <- metadata
+bad_schedule$openspliceai.convolution.kernel_size[[1L]] <- 3.5
+expect_error(
+    Rllm:::.rllm_program_openspliceai(
+        bad_schedule, directory, rope_mode = NULL
+    ),
+    "convolution schedule is invalid"
+)
+bad_context <- metadata
+bad_context$openspliceai.context_length <- 18L
+expect_error(
+    Rllm:::.rllm_program_openspliceai(
+        bad_context, directory, rope_mode = NULL
+    ),
+    "context length disagrees"
+)
+expect_equal(
+    rllm_execute(
+        adapted, list(sequence = sequence), parameters = parameters
+    )$probabilities,
+    result$probabilities,
+    tolerance = 1e-12
+)
+expect_error(
+    Rllm:::.rllm_lower_program(
+        adapted, list(architecture = "openspliceai")
+    ),
+    "native program input must be i32 tokens"
+)
+unlink(path)
+
+message("OpenSpliceAI program and dense execution tests completed")

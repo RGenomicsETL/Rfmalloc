@@ -142,9 +142,10 @@ one.
 
 The native compiler recognizes a deliberately constrained transformer grammar:
 embedding, repeated attention or state-space blocks with two residual joins,
-and projection or pooled embedding output. ESM, TRM and Evo are useful because
-they force this grammar to grow through reusable dataflow, multi-result and
-state primitives rather than model-name exceptions.
+and projection or pooled embedding output. ESM, OpenSpliceAI, TRM and Evo are
+useful because they force this grammar to grow through reusable dataflow,
+multi-result, convolution and state primitives rather than model-name
+exceptions.
 
 [Rtinycc](https://github.com/sounkou-bioinfo/Rtinycc) is a plausible lowering
 target for the program, not the language itself. It can turn a declarative
@@ -162,7 +163,8 @@ fallback; generated C would be a cache derived from the AST, never another
 source of truth.
 
 The ESM-2 8M numerical proof is closed at the dense semantic boundary. The
-official `fair-esm` checkpoint converts to 106 unmodified F32 tensors in GGUF.
+official Facebook safetensors checkpoint converts through Rgguf to 106
+unmodified F32 tensors in GGUF.
 Its adapter emits a 69-node program directly. A fixed protein crosses the
 second typed input, token dropout, padding semantics, six multi-result rotary
 attention blocks, representation and attention taps, tied projection and the
@@ -172,6 +174,21 @@ contacts agree with official execution within 0.003, 0.0002, 0.00003 and
 not acquire an ESM executor branch. The native GGML compiler still rejects the
 two-input grammar explicitly, so native ESM execution remains a compilation
 proof rather than a semantic uncertainty.
+
+OpenSpliceAI closes a second biological-model proof at the same dense boundary.
+Its upstream MANE 80 nt rs10 checkpoint becomes 56 unchanged F32 tensors
+through Rgguf. A 36-node program records four residual dilated-convolution
+blocks, inference batch normalization, leaky ReLU, accumulated skip
+projections, the context crop and per-position softmax. Its complete
+16-position output agrees with the pinned upstream PyTorch model within 5e-7.
+The reference vocabulary gained reusable one-dimensional convolution and
+normalization operators, not an OpenSpliceAI executor. The native transformer
+lowerer rejects the floating-point sequence input explicitly. This is a
+semantic proof, not a speedup. On the i5-13500 with one thread and the same
+4-by-5080 production-shaped input, upstream PyTorch took a 14.81 ms median over
+10 warm runs; the dense R oracle took 252 ms over seven, 17.0 times slower.
+That gives the native lowering a concrete threshold: no CPU performance claim
+exists until the unchanged program beats the upstream path on this workload.
 
 A constrained vocabulary plus a deterministic validator makes both human and
 LLM-authored programs reviewable; the prompt is not the artifact. This is the
@@ -199,8 +216,10 @@ again from that boundary.
 
 ## The next contradictions to push
 
-1. Lower the ESM semantic operators through GGML without changing its program
-   or numerical oracle. Then close full TRM recurrence and Evo's genuinely new
+1. Lower the ESM and OpenSpliceAI semantic operators through GGML without
+   changing either program or numerical oracle. Compare OpenSpliceAI with
+   upstream PyTorch on identical production-length windows before making a CPU
+   performance claim. Then close full TRM recurrence and Evo's genuinely new
    Hyena FIR/IIR operators.
 2. Patch kalis to borrow the aligned haplotype view while preserving its cache
    ownership and SIMD invariants. Compare Forward/Backward output against its

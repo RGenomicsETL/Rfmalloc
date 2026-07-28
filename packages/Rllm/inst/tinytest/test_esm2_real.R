@@ -2,7 +2,7 @@ library(tinytest)
 library(Rllm)
 
 # Opt-in numerical execution of the official facebookresearch/esm ESM-2 8M
-# checkpoint after tools/convert_esm2.py writes its unmodified F32 tensors to
+# checkpoint after tools/convert_esm2.R writes its unmodified F32 tensors to
 # GGUF. The reference values come from fair-esm 2.0.0 with return_contacts and
 # per-head attention enabled. The hermetic DSL test pins the topology without
 # downloading a checkpoint.

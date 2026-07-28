@@ -49,6 +49,7 @@ mapped or device-backed value rather than materializing it in R.
 The built-in dense reference vocabulary covers arithmetic, normalization,
 pooling, activations and recurrence helpers. It also covers ESM token
 dropout, key-padded rotary attention with attention-map results, tied
-projection and contact regression. Entries in \code{operators} replace
-built-ins with the same name.
+projection and contact regression, plus the dilated convolution, inference
+batch normalization, cropping and softmax used by OpenSpliceAI. Entries in
+\code{operators} replace built-ins with the same name.
 }

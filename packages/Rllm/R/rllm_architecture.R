@@ -88,6 +88,9 @@
         qwen35 = .rllm_program_qwen35(metadata, directory, rope_mode),
         lfm2moe = .rllm_program_lfm2moe(metadata, directory, rope_mode),
         esm2 = .rllm_program_esm2(metadata, directory, rope_mode),
+        openspliceai = .rllm_program_openspliceai(
+            metadata, directory, rope_mode
+        ),
         `gemma-embedding` = .rllm_program_gemma_embedding(
             metadata, directory, rope_mode
         ),

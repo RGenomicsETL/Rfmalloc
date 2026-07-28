@@ -34,9 +34,10 @@ lowering.
 \details{
 Architecture definitions are data ASTs rather than native model-family
 branches. Native GGML lowering covers llama, Qwen3.5, LFM2MoE and
-EmbeddingGemma. ESM-2 is numerically executable through \code{\link[=rllm_execute]{rllm_execute()}}
-but its two-input program is not accepted by this native model loader.
-Models with tied embeddings reuse \code{token_embd.weight} as the output
+EmbeddingGemma. ESM-2 and OpenSpliceAI are numerically executable through
+\code{\link[=rllm_execute]{rllm_execute()}}, but their multi-input or floating-point sequence-input
+programs are not accepted by this native model loader. Models with tied
+embeddings reuse \code{token_embd.weight} as the output
 projection.
 }
 \seealso{

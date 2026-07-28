@@ -72,7 +72,6 @@ local({
   )
   rawToChar(gen$raw)
 })
-#> [1] " the city of Paris. city of Paris is the capital of France. Both statements"
 ```
 
 The evaluated transcript comes from LFM2.5-8B-A1B `Q4_K_M`. Set
@@ -155,17 +154,34 @@ yet exist.
 
 The native lowerer implements the operators exercised by llama, Qwen3.5,
 LFM2MoE and EmbeddingGemma. ESM-2 8M also crosses the real numerical
-boundary. `tools/convert_esm2.py`, using the `fair-esm` and `gguf`
-Python packages, asks the official loader for the checkpoint and writes
-its 106 unmodified F32 tensors to GGUF. The GGUF adapter constructs a
-69-node program with typed token and padding inputs, six rotary
-attention layers returning hidden states and attention maps, tied
-embeddings, representation and attention taps, and the contact head. The
-dense R interpreter matches the official execution on a fixed protein:
-selected logits, representations, attention probabilities and contacts
-agree within 0.003, 0.0002, 0.00003 and 0.0003 respectively. Its native
+boundary. `tools/convert_esm2.R` reads Facebook’s official
+`model.safetensors`, `config.json` and `vocab.txt`, maps their published
+Transformers names back to the fair-esm state-dict names, and gives the
+106 unmodified F32 tensors to Rgguf’s upstream GGUF writer. From the
+package source, `Rscript tools/convert_esm2.R esm2.gguf` downloads those
+three official files; an optional second argument selects a cached
+directory or another base URL. The GGUF adapter constructs a 69-node
+program with typed token and padding inputs, six rotary attention layers
+returning hidden states and attention maps, tied embeddings,
+representation and attention taps, and the contact head. The dense R
+interpreter matches the official execution on a fixed protein: selected
+logits, representations, attention probabilities and contacts agree
+within 0.003, 0.0002, 0.00003 and 0.0003 respectively. Its native
 two-input GGML lowering remains explicit work and fails at the grammar
 boundary.
+
+[OpenSpliceAI](https://github.com/Kuanhao-Chao/OpenSpliceAI) supplies a
+second non-transformer numerical test. Its program records the residual
+dilated 1-D convolutions, inference batch normalization, leaky ReLU,
+accumulated skip projections, context crop and per-position softmax
+without an OpenSpliceAI executor branch. `tools/convert_openspliceai.R`
+uses a Python environment with PyTorch and safetensors only to read the
+upstream state dictionary into a temporary safetensors file, then gives
+all 56 F32 tensors to Rgguf’s writer:
+`Rscript tools/convert_openspliceai.R openspliceai.gguf model_80nt_rs10.pt 80`.
+The complete 16-position output of the MANE 80 nt rs10 checkpoint agrees
+with upstream PyTorch within 5e-7. The generic GGML transformer lowerer
+rejects its floating-point sequence-input grammar explicitly.
 
 Evo 2 remains an executable-frontier probe, but its program is not a
 caricature. The Evo 2 7B program records the complete 32-layer schedule:
@@ -222,7 +238,9 @@ generation model, while `RLLM_EMBEDDING_GGUF=<path>` compares the 300M
 EmbeddingGemma Q8_0 probe with an upstream llama.cpp reference.
 `RLLM_QWEN35_GGUF=<path>` executes a real hybrid checkpoint; pairing it
 with `RLLM_QWEN35_REFERENCE=<f32.bin>` checks a portable upstream logit
-transcript bit-for-bit.
+transcript bit-for-bit. `RLLM_ESM2_GGUF=<path>` and
+`RLLM_OPENSPLICEAI_GGUF=<path>` run the two real biological-model
+numerical oracles.
 
 ## Compute follows residency
 

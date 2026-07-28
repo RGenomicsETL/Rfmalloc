@@ -95,7 +95,7 @@ round(c(
   peak_mmap_MB = peak_mapped
 ))
 #>   payload_MB peak_heap_MB peak_mmap_MB 
-#>          610          697           86
+#>          610          697           87
 identical(sv_mapped, sv_heap)
 #> [1] TRUE
 ```
@@ -182,7 +182,6 @@ local({
   )
   rawToChar(gen$raw)
 })
-#> [1] " the city of Paris. city of Paris is the capital of France. Both statements"
 ```
 
 The evaluated run uses LFM2.5-8B-A1B `Q4_K_M`, not a toy model shaped to
@@ -245,19 +244,24 @@ non-causal and symmetric-window attention, post-branch normalization,
 pooling and projection. The complete ESM-2 8M topology forces typed
 token and padding inputs, attention maps as second results, arbitrary
 representation taps, tied embeddings and a contact head over those maps.
-The Evo 2 7B topology forces the real 32-layer schedule: 27 HCS, HCM and
-HCL cascades with different FIR or IIR state, plus five interleaved
-attention layers. Tiny Recursive Models force shared modules and nested
-carried state.
+OpenSpliceAI forces residual dilated 1-D convolutions, inference batch
+normalization, accumulated skip projections, context cropping and
+per-position softmax. The Evo 2 7B topology forces the real 32-layer
+schedule: 27 HCS, HCM and HCL cascades with different FIR or IIR state,
+plus five interleaved attention layers. Tiny Recursive Models force
+shared modules and nested carried state.
 
 `rllm_execute()` interprets the same program’s dataflow and loops
 through an explicit operator table. A dense oracle executes the TRM
 `z_H` and `z_L` recurrence across its three nested symbolic loops and
 agrees with direct R iteration. It is the semantic oracle for the native
-bound-program lowering, not a second GGUF runtime. ESM and Evo still
-need checkpoint importers and numerical lowerings, while TRM still needs
-its full bidirectional-attention lowering. Those absences remain named
-operator failures instead of becoming architecture switches.
+bound-program lowering, not a second GGUF runtime. Official ESM-2 and
+OpenSpliceAI checkpoints now cross complete dense numerical oracles
+through Rgguf; their native GGML lowerings remain explicit work. Evo
+still needs a checkpoint importer and numerical lowering, while TRM
+still needs its full bidirectional-attention lowering. Those absences
+remain named operator failures instead of becoming architecture
+switches.
 
 [Rtinycc](https://github.com/sounkou-bioinfo/Rtinycc) gives this
 separation a useful experimental path. A data-only program can generate
