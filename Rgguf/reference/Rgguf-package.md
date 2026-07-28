@@ -37,7 +37,7 @@ Rggml package.
 ## Design
 
 Allocation happens on the R side: tensor destinations are created with
-[`Rfmalloc::create_fmalloc_matrix()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/create_fmalloc_matrix.html)/[`create_fmalloc_array()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/create_fmalloc_array.html),
+[`Rfmalloc::create_fmalloc_matrix()`](https://rdrr.io/pkg/Rfmalloc/man/create_fmalloc_matrix.html)/[`create_fmalloc_array()`](https://rdrr.io/pkg/Rfmalloc/man/create_fmalloc_array.html),
 which returns a properly classed, file-backed ALTREP object with
 Rfmalloc's full `Ops`/matrix-product dispatch already working. Native
 code only ever fills that destination in place (dequantizing as it

@@ -22,10 +22,10 @@ rllm_gguf_model(path, runtime = NULL, rope_mode = NULL)
 
 - runtime:
 
-  [`Rfmalloc::open_fmalloc()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/open_fmalloc.html)
+  [`Rfmalloc::open_fmalloc()`](https://rdrr.io/pkg/Rfmalloc/man/open_fmalloc.html)
   runtime attached to the borrowed tensor views, or `NULL` to use the
   default established by
-  [`Rfmalloc::init_fmalloc()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/init_fmalloc.html).
+  [`Rfmalloc::init_fmalloc()`](https://rdrr.io/pkg/Rfmalloc/man/init_fmalloc.html).
   It supplies the allocation context for operations which produce
   fmalloc results; the weight bytes remain in the GGUF mapping.
 
@@ -45,11 +45,12 @@ created lazily by
 
 Architecture definitions are data ASTs rather than native model-family
 branches. Native GGML lowering covers llama, Qwen3.5, LFM2MoE and
-EmbeddingGemma. ESM-2 is numerically executable through
-[`rllm_execute()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rllm/reference/rllm_execute.md)
-but its two-input program is not accepted by this native model loader.
-Models with tied embeddings reuse `token_embd.weight` as the output
-projection.
+EmbeddingGemma. ESM-2 and OpenSpliceAI are numerically executable
+through
+[`rllm_execute()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rllm/reference/rllm_execute.md),
+but their multi-input or floating-point sequence-input programs are not
+accepted by this native model loader. Models with tied embeddings reuse
+`token_embd.weight` as the output projection.
 
 ## See also
 

@@ -80,7 +80,7 @@ GGML's SIMD-dispatched kernels without ever being decoded to double.</p>
 
 <dt id="arg-runtime">runtime<a class="anchor" aria-label="anchor" href="#arg-runtime"></a></dt>
 <dd><p>Optional <span class="pkg">Rfmalloc</span> runtime handle
-(see <code><a href="https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/open_fmalloc.html" class="external-link">Rfmalloc::open_fmalloc()</a></code>); if <code>NULL</code>, Rfmalloc's default
+(see <code><a href="https://rdrr.io/pkg/Rfmalloc/man/open_fmalloc.html" class="external-link">Rfmalloc::open_fmalloc()</a></code>); if <code>NULL</code>, Rfmalloc's default
 runtime is used.</p></dd>
 
 </dl></div>
@@ -99,12 +99,12 @@ and 32 for <code>"q4_0"</code>, <code>"q4_1"</code>, <code>"q5_0"</code>, <code>
     </div>
     <div class="section level2">
     <h2 id="see-also">See also<a class="anchor" aria-label="anchor" href="#see-also"></a></h2>
-    <div class="dont-index"><p><code><a href="rllm_use_ggml.html">rllm_use_ggml()</a></code>, <code><a href="https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/fmalloc_tensor.html" class="external-link">Rfmalloc::create_fmalloc_tensor()</a></code></p></div>
+    <div class="dont-index"><p><code><a href="rllm_use_ggml.html">rllm_use_ggml()</a></code>, <code><a href="https://rdrr.io/pkg/Rfmalloc/man/fmalloc_tensor.html" class="external-link">Rfmalloc::create_fmalloc_tensor()</a></code></p></div>
     </div>
 
     <div class="section level2">
     <h2 id="ref-examples">Examples<a class="anchor" aria-label="anchor" href="#ref-examples"></a></h2>
-    <div class="sourceCode"><pre class="sourceCode r"><code><span class="r-in"><span><span class="va">rt</span> <span class="op">&lt;-</span> <span class="fu">Rfmalloc</span><span class="fu">::</span><span class="fu"><a href="https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/open_fmalloc.html" class="external-link">open_fmalloc</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/tempfile.html" class="external-link">tempfile</a></span><span class="op">(</span>fileext <span class="op">=</span> <span class="st">".bin"</span><span class="op">)</span><span class="op">)</span></span></span>
+    <div class="sourceCode"><pre class="sourceCode r"><code><span class="r-in"><span><span class="va">rt</span> <span class="op">&lt;-</span> <span class="fu">Rfmalloc</span><span class="fu">::</span><span class="fu"><a href="https://rdrr.io/pkg/Rfmalloc/man/open_fmalloc.html" class="external-link">open_fmalloc</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/tempfile.html" class="external-link">tempfile</a></span><span class="op">(</span>fileext <span class="op">=</span> <span class="st">".bin"</span><span class="op">)</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/base/Random.html" class="external-link">set.seed</a></span><span class="op">(</span><span class="fl">1</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="va">W</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/matrix.html" class="external-link">matrix</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/stats/Normal.html" class="external-link">rnorm</a></span><span class="op">(</span><span class="fl">256</span> <span class="op">*</span> <span class="fl">4</span>, sd <span class="op">=</span> <span class="fl">0.4</span><span class="op">)</span>, nrow <span class="op">=</span> <span class="fl">256</span><span class="op">)</span>  <span class="co"># 256 must divide nrow</span></span></span>
 <span class="r-in"><span><span class="va">Wt</span> <span class="op">&lt;-</span> <span class="fu">rllm_quantize_tensor</span><span class="op">(</span><span class="va">W</span>, <span class="st">"q4_k"</span>, runtime <span class="op">=</span> <span class="va">rt</span><span class="op">)</span></span></span>

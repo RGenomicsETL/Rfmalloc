@@ -60,7 +60,7 @@ into a fresh <span class="pkg">Rfmalloc</span>-backed ALTREP matrix or array of 
 
 <dt id="arg-runtime">runtime<a class="anchor" aria-label="anchor" href="#arg-runtime"></a></dt>
 <dd><p>Optional <code>Rfmalloc</code> runtime handle (see
-<code><a href="https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/open_fmalloc.html" class="external-link">Rfmalloc::open_fmalloc()</a></code>). If <code>NULL</code>, <code>Rfmalloc</code>'s own default-runtime
+<code><a href="https://rdrr.io/pkg/Rfmalloc/man/open_fmalloc.html" class="external-link">Rfmalloc::open_fmalloc()</a></code>). If <code>NULL</code>, <code>Rfmalloc</code>'s own default-runtime
 resolution is used.</p></dd>
 
 
@@ -68,7 +68,7 @@ resolution is used.</p></dd>
 <dd><p><code>"numeric"</code> (default) dequantizes the whole tensor into an
 fmalloc double matrix/array. <code>"native"</code> copies the tensor's raw,
 still-encoded payload into fmalloc storage and returns an
-<code><a href="https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/fmalloc_tensor.html" class="external-link">Rfmalloc::create_fmalloc_tensor()</a></code> typed tensor: it keeps the GGUF
+<code><a href="https://rdrr.io/pkg/Rfmalloc/man/fmalloc_tensor.html" class="external-link">Rfmalloc::create_fmalloc_tensor()</a></code> typed tensor: it keeps the GGUF
 storage density (e.g. 4.5 bits/weight for <code>q4_k</code>) and is decoded in
 bounded panels only when used in matrix products. <code>"view"</code> returns the
 same typed tensor without copying: it borrows the exact read-only span in
@@ -97,7 +97,7 @@ this mapping by writing known matrices/arrays and reading them back.</p>
     <h2 id="ref-examples">Examples<a class="anchor" aria-label="anchor" href="#ref-examples"></a></h2>
     <div class="sourceCode"><pre class="sourceCode r"><code><span class="r-in"><span><span class="va">tmp</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/tempfile.html" class="external-link">tempfile</a></span><span class="op">(</span>fileext <span class="op">=</span> <span class="st">".gguf"</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="fu"><a href="gguf_write_tensors.html">gguf_write_tensors</a></span><span class="op">(</span><span class="va">tmp</span>, <span class="fu"><a href="https://rdrr.io/r/base/list.html" class="external-link">list</a></span><span class="op">(</span>w <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/matrix.html" class="external-link">matrix</a></span><span class="op">(</span><span class="fl">1</span><span class="op">:</span><span class="fl">6</span> <span class="op">+</span> <span class="fl">0.5</span>, nrow <span class="op">=</span> <span class="fl">2</span><span class="op">)</span><span class="op">)</span><span class="op">)</span></span></span>
-<span class="r-in"><span><span class="va">rt</span> <span class="op">&lt;-</span> <span class="fu">Rfmalloc</span><span class="fu">::</span><span class="fu"><a href="https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/open_fmalloc.html" class="external-link">open_fmalloc</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/tempfile.html" class="external-link">tempfile</a></span><span class="op">(</span>fileext <span class="op">=</span> <span class="st">".bin"</span><span class="op">)</span><span class="op">)</span></span></span>
+<span class="r-in"><span><span class="va">rt</span> <span class="op">&lt;-</span> <span class="fu">Rfmalloc</span><span class="fu">::</span><span class="fu"><a href="https://rdrr.io/pkg/Rfmalloc/man/open_fmalloc.html" class="external-link">open_fmalloc</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/tempfile.html" class="external-link">tempfile</a></span><span class="op">(</span>fileext <span class="op">=</span> <span class="st">".bin"</span><span class="op">)</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="va">w</span> <span class="op">&lt;-</span> <span class="fu">gguf_tensor</span><span class="op">(</span><span class="va">tmp</span>, <span class="st">"w"</span>, runtime <span class="op">=</span> <span class="va">rt</span><span class="op">)</span></span></span>
 <span class="r-in"><span><span class="va">w</span></span></span>
 <span class="r-out co"><span class="r-pr">#&gt;</span>      [,1] [,2] [,3]</span>
@@ -105,7 +105,7 @@ this mapping by writing known matrices/arrays and reading them back.</p>
 <span class="r-out co"><span class="r-pr">#&gt;</span> [2,]  2.5  4.5  6.5</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> attr(,"class")</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> [1] "fmalloc_matrix" "matrix"         "fmalloc"        "numeric"       </span>
-<span class="r-in"><span><span class="fu">Rfmalloc</span><span class="fu">::</span><span class="fu"><a href="https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/fmalloc_api.html" class="external-link">is_fmalloc_vector</a></span><span class="op">(</span><span class="va">w</span><span class="op">)</span></span></span>
+<span class="r-in"><span><span class="fu">Rfmalloc</span><span class="fu">::</span><span class="fu"><a href="https://rdrr.io/pkg/Rfmalloc/man/fmalloc_api.html" class="external-link">is_fmalloc_vector</a></span><span class="op">(</span><span class="va">w</span><span class="op">)</span></span></span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> [1] TRUE</span>
 <span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/base/unlink.html" class="external-link">unlink</a></span><span class="op">(</span><span class="va">tmp</span><span class="op">)</span></span></span>
 <span class="r-in"><span></span></span>

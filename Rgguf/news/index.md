@@ -35,7 +35,7 @@
   `gguf_import(as = "native")`) copy a 2-d tensor’s raw GGUF payload
   into fmalloc storage at its original density (e.g. 4.5 bits/weight for
   `q4_k`) and return an
-  [`Rfmalloc::fmalloc_tensor`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/fmalloc_tensor.html),
+  [`Rfmalloc::fmalloc_tensor`](https://rdrr.io/pkg/Rfmalloc/man/fmalloc_tensor.html),
   decoded in bounded panels only inside matrix products. Registers
   GGML-backed codecs for `q4_0`, `q4_1`, `q5_0`, `q5_1`, `q8_0`, `q2_k`,
   `q3_k`, `q4_k`, `q5_k`, and `q6_k`.
@@ -63,7 +63,7 @@
   to read and dequantize a single named tensor directly into an
   `Rfmalloc`-backed, file-backed ALTREP matrix/array of doubles: R
   allocates the destination via
-  [`Rfmalloc::create_fmalloc_matrix()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/create_fmalloc_matrix.html)/[`create_fmalloc_array()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/create_fmalloc_array.html),
+  [`Rfmalloc::create_fmalloc_matrix()`](https://rdrr.io/pkg/Rfmalloc/man/create_fmalloc_matrix.html)/[`create_fmalloc_array()`](https://rdrr.io/pkg/Rfmalloc/man/create_fmalloc_array.html),
   and native code fills it in place, so no ordinary R-sized copy of the
   tensor is ever materialized on the R heap.
 

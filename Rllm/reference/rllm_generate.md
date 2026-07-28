@@ -77,7 +77,7 @@ rllm_generate(
 - runtime:
 
   Optional
-  [`Rfmalloc::open_fmalloc()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/open_fmalloc.html)
+  [`Rfmalloc::open_fmalloc()`](https://rdrr.io/pkg/Rfmalloc/man/open_fmalloc.html)
   runtime for the cache slabs (file-backed cache).
 
 - backend:

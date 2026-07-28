@@ -25,7 +25,7 @@ gguf_tensor(x, name, runtime = NULL, as = c("numeric", "native", "view"))
 - runtime:
 
   Optional `Rfmalloc` runtime handle (see
-  [`Rfmalloc::open_fmalloc()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/open_fmalloc.html)).
+  [`Rfmalloc::open_fmalloc()`](https://rdrr.io/pkg/Rfmalloc/man/open_fmalloc.html)).
   If `NULL`, `Rfmalloc`'s own default-runtime resolution is used.
 
 - as:
@@ -33,7 +33,7 @@ gguf_tensor(x, name, runtime = NULL, as = c("numeric", "native", "view"))
   `"numeric"` (default) dequantizes the whole tensor into an fmalloc
   double matrix/array. `"native"` copies the tensor's raw, still-encoded
   payload into fmalloc storage and returns an
-  [`Rfmalloc::create_fmalloc_tensor()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/fmalloc_tensor.html)
+  [`Rfmalloc::create_fmalloc_tensor()`](https://rdrr.io/pkg/Rfmalloc/man/fmalloc_tensor.html)
   typed tensor: it keeps the GGUF storage density (e.g. 4.5 bits/weight
   for `q4_k`) and is decoded in bounded panels only when used in matrix
   products. `"view"` returns the same typed tensor without copying: it

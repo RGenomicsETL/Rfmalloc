@@ -17,7 +17,7 @@ read-only and owns no second GGUF parser.
 There are three storage paths:
 
 1.  `as = "numeric"`: R allocates the destination with
-    [`Rfmalloc::create_fmalloc_matrix()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/create_fmalloc_matrix.html)/[`create_fmalloc_array()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/create_fmalloc_array.html),
+    [`Rfmalloc::create_fmalloc_matrix()`](https://rdrr.io/pkg/Rfmalloc/man/create_fmalloc_matrix.html)/[`create_fmalloc_array()`](https://rdrr.io/pkg/Rfmalloc/man/create_fmalloc_array.html),
     which returns a properly classed, file-backed ALTREP object -
     `Rfmalloc`’s `Ops`/matrix-product dispatch already works on it.
     Rggml’s official parser locates the tensor in the read-only GGUF
@@ -54,7 +54,7 @@ The example uses [`local()`](https://rdrr.io/r/base/eval.html) so its
 [`on.exit()`](https://rdrr.io/r/base/on.exit.html) cleanup stays scoped
 to the snippet. In your own code, keep the runtime handle for as long as
 its arrays are live and call
-[`Rfmalloc::cleanup_fmalloc()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/cleanup_fmalloc.html)
+[`Rfmalloc::cleanup_fmalloc()`](https://rdrr.io/pkg/Rfmalloc/man/cleanup_fmalloc.html)
 when finished.
 
 ``` r
@@ -113,7 +113,7 @@ local({
 `gguf_tensor(as = "native")` skips dequantization at import: the
 tensor’s raw GGUF payload is copied into fmalloc storage at its original
 density (4.5 bits/weight for `q4_k`) and returned as an
-[`Rfmalloc::fmalloc_tensor`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/fmalloc_tensor.html).
+[`Rfmalloc::fmalloc_tensor`](https://rdrr.io/pkg/Rfmalloc/man/fmalloc_tensor.html).
 Matrix products against dense operands decode the payload in bounded,
 block-aligned panels streamed through BLAS `dgemm`, so the full double
 representation is never materialized. Rgguf registers GGML-backed codecs
@@ -132,7 +132,7 @@ conventions.
 `gguf_tensor(as = "view")` has the same typed-tensor interface but does
 not copy the payload. It is the inference path: Rllm points GGML
 directly at the borrowed bytes.
-[`Rfmalloc::fmalloc_storage_advise()`](https://sounkou-bioinfo.github.io/Rfmalloc/Rfmalloc/reference/fmalloc_storage_advise.html)
+[`Rfmalloc::fmalloc_storage_advise()`](https://rdrr.io/pkg/Rfmalloc/man/fmalloc_storage_advise.html)
 can express sequential, prefetch, and release intentions over the view
 for out-of-core schedulers.
 
