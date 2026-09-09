@@ -123,11 +123,11 @@ licenses.
 
 ## Installation
 
-From the [r-universe](https://sounkou-bioinfo.r-universe.dev):
+From the [r-universe](https://rgenomicsetl.r-universe.dev):
 
 ``` r
 install.packages("Rpgen",
-  repos = c("https://sounkou-bioinfo.r-universe.dev", getOption("repos")))
+  repos = c("https://rgenomicsetl.r-universe.dev", getOption("repos")))
 ```
 
 or from the monorepo subdirectory:

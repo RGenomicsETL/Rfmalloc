@@ -293,11 +293,11 @@ interfaces need no fork for either.
 
 ## Install
 
-From the [r-universe](https://sounkou-bioinfo.r-universe.dev):
+From the [r-universe](https://rgenomicsetl.r-universe.dev):
 
 ``` r
 install.packages("Rllm",
-  repos = c("https://sounkou-bioinfo.r-universe.dev", getOption("repos")))
+  repos = c("https://rgenomicsetl.r-universe.dev", getOption("repos")))
 ```
 
 or via a GitHub subdir ref:

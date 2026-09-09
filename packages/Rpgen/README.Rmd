@@ -136,11 +136,11 @@ zstd, libdeflate, SIMDe, and SFMT components retain their own licenses.
 
 ## Installation
 
-From the [r-universe](https://sounkou-bioinfo.r-universe.dev):
+From the [r-universe](https://rgenomicsetl.r-universe.dev):
 
 ```{r eval = FALSE}
 install.packages("Rpgen",
-  repos = c("https://sounkou-bioinfo.r-universe.dev", getOption("repos")))
+  repos = c("https://rgenomicsetl.r-universe.dev", getOption("repos")))
 ```
 
 or from the monorepo subdirectory:

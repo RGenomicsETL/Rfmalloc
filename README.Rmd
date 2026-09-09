@@ -355,13 +355,13 @@ come from measured paths, not from the presence of a backend name in a build.
 ## Install and provenance
 
 The packages are available from
-[r-universe](https://sounkou-bioinfo.r-universe.dev). Installing `Rllm` pulls
+[r-universe](https://rgenomicsetl.r-universe.dev). Installing `Rllm` pulls
 the composed CPU stack.
 
 ```{r install, eval = FALSE}
 install.packages(
   "Rllm",
-  repos = c("https://sounkou-bioinfo.r-universe.dev", getOption("repos"))
+  repos = c("https://rgenomicsetl.r-universe.dev", getOption("repos"))
 )
 ```
 
