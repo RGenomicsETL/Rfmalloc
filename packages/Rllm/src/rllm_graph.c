@@ -1457,3 +1457,593 @@ SEXP RC_rllm_program_forward(SEXP bound, SEXP tokens_sexp,
 #undef RLLM_FAIL
 #undef RLLM_WEIGHT
 }
+
+static struct ggml_tensor *rllm_f32_source(struct ggml_tensor **values,
+                                           SEXP nodes, int before, SEXP node,
+                                           int input)
+{
+    SEXP refs = rllm_list_elt(node, "inputs");
+    if (TYPEOF(refs) != STRSXP || input < 0 || input >= XLENGTH(refs)) {
+        Rf_error("native F32 node has an invalid input reference");
+    }
+    const char *id = CHAR(STRING_ELT(refs, input));
+    for (int i = 0; i < before; ++i) {
+        SEXP candidate = VECTOR_ELT(nodes, i);
+        if (!strcmp(rllm_string(candidate, "id"), id)) {
+            if (!values[i]) Rf_error("native F32 node refers to unavailable input");
+            return values[i];
+        }
+    }
+    Rf_error("native F32 node refers to a later or unknown input");
+    return NULL;
+}
+
+static int rllm_f32_same_shape(const struct ggml_tensor *a,
+                               const struct ggml_tensor *b)
+{
+    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+        if (a->ne[i] != b->ne[i]) return 0;
+    }
+    return 1;
+}
+
+static const char *rllm_f32_parameter(SEXP attributes, const char *field)
+{
+    SEXP parameter = rllm_list_elt(attributes, field);
+    if (TYPEOF(parameter) != VECSXP) {
+        Rf_error("native F32 operator field '%s' must be a parameter", field);
+    }
+    return rllm_string(parameter, "name");
+}
+
+static const float *rllm_f32_parameter_data(SEXP tensors, const char *name,
+                                             int expected, size_t *bytes,
+                                             Rfmalloc_storage_data_fun storage_data)
+{
+    SEXP binding = rllm_list_elt(tensors, name);
+    SEXP type = rllm_list_elt(binding, "type");
+    SEXP payload = rllm_list_elt(binding, "payload");
+    const void *data = NULL;
+    size_t extent = 0;
+    if (TYPEOF(type) != STRSXP || XLENGTH(type) != 1 ||
+        strcmp(CHAR(STRING_ELT(type, 0)), "f32") ||
+        expected < 1 || (size_t) expected > SIZE_MAX / sizeof(float) ||
+        storage_data(payload, &data, &extent, NULL) != 0 ||
+        extent < (size_t) expected * sizeof(float)) {
+        Rf_error("native F32 parameter '%s' has an invalid payload", name);
+    }
+    if (bytes) *bytes = extent;
+    return (const float *) data;
+}
+
+/* Persistent fixed-shape F32 execution. The protected owner retains CPU
+ * mapped payload spans, and additionally the CUDA weight context when used.
+ * A CPU execution context owns its backend; a CUDA execution context borrows
+ * the model-owned backend. */
+struct rllm_f32_context {
+    int backend_code;
+    int own_backend;
+    int channels;
+    int sequence_length;
+    int batch;
+    int output_dim[3];
+    R_xlen_t input_count;
+    R_xlen_t output_count;
+    ggml_backend_t backend;
+    struct ggml_context *wctx;
+    struct ggml_context *cctx;
+    ggml_backend_buffer_t cbuf;
+    struct ggml_cgraph *graph;
+    struct ggml_tensor *input;
+    struct ggml_tensor *output;
+    Rggml_conv_1d_f32_plan **conv_plans;
+    int n_conv_plans;
+    Rggml_conv_1d_f32_plan_destroy_fun conv_plan_destroy;
+    float *input_host;
+    float *output_host;
+    char *output_name;
+    Rggml_context_free_fun context_free;
+    Rggml_backend_buffer_free_fun buffer_free;
+    Rggml_backend_free_fun backend_free;
+};
+
+struct rllm_f32_upload {
+    struct ggml_tensor *tensor;
+    const void *data;
+    size_t bytes;
+    void *owned;
+};
+
+static SEXP rllm_f32_context_tag(void)
+{
+    return Rf_install("Rllm_f32_execution_context");
+}
+
+static void rllm_f32_context_destroy(struct rllm_f32_context *ctx)
+{
+    if (!ctx) return;
+    free(ctx->input_host);
+    free(ctx->output_host);
+    free(ctx->output_name);
+    if (ctx->conv_plans && ctx->conv_plan_destroy) {
+        for (int i = 0; i < ctx->n_conv_plans; ++i) {
+            ctx->conv_plan_destroy(ctx->conv_plans[i]);
+        }
+    }
+    free(ctx->conv_plans);
+    if (ctx->cbuf && ctx->buffer_free) ctx->buffer_free(ctx->cbuf);
+    if (ctx->cctx && ctx->context_free) ctx->context_free(ctx->cctx);
+    if (ctx->wctx && ctx->context_free) ctx->context_free(ctx->wctx);
+    if (ctx->own_backend && ctx->backend && ctx->backend_free) {
+        ctx->backend_free(ctx->backend);
+    }
+    free(ctx);
+}
+
+static void rllm_f32_context_finalizer(SEXP ext)
+{
+    struct rllm_f32_context *ctx =
+        (struct rllm_f32_context *) R_ExternalPtrAddr(ext);
+    if (!ctx) return;
+    rllm_f32_context_destroy(ctx);
+    R_ClearExternalPtr(ext);
+}
+
+static int rllm_f32_mul_size(size_t a, size_t b, size_t *out)
+{
+    if (a && b > SIZE_MAX / a) return -1;
+    *out = a * b;
+    return 0;
+}
+
+static int rllm_f32_product3(int a, int b, int c, R_xlen_t *out,
+                              size_t *bytes)
+{
+    size_t n;
+    if (a < 1 || b < 1 || c < 1 ||
+        rllm_f32_mul_size((size_t) a, (size_t) b, &n) ||
+        rllm_f32_mul_size(n, (size_t) c, &n) ||
+        n > (size_t) R_XLEN_T_MAX ||
+        rllm_f32_mul_size(n, sizeof(float), bytes)) return -1;
+    *out = (R_xlen_t) n;
+    return 0;
+}
+
+static void rllm_f32_upload_add(struct rllm_f32_upload *uploads, int *n,
+                                 int max, struct ggml_tensor *tensor,
+                                 const void *data, size_t bytes, void *owned)
+{
+    if (*n >= max || !tensor || !data || !bytes) {
+        Rf_error("native F32 fixed-data upload table overflow");
+    }
+    uploads[*n].tensor = tensor;
+    uploads[*n].data = data;
+    uploads[*n].bytes = bytes;
+    uploads[*n].owned = owned;
+    ++*n;
+}
+
+static void rllm_f32_upload_release(struct rllm_f32_upload *uploads, int n)
+{
+    if (!uploads) return;
+    for (int i = 0; i < n; ++i) free(uploads[i].owned);
+    free(uploads);
+}
+
+static void rllm_f32_validate_dataflow(SEXP nodes)
+{
+    int n_nodes = (int) XLENGTH(nodes);
+    for (int i = 0; i < n_nodes; ++i) {
+        SEXP node = VECTOR_ELT(nodes, i);
+        const char *op = rllm_string(node, "op");
+        if (i == 0) continue;
+        if (strcmp(op, "conv1d") && strcmp(op, "batch_norm") &&
+            strcmp(op, "leaky_relu") && strcmp(op, "add") &&
+            strcmp(op, "crop1d") && strcmp(op, "softmax")) {
+            Rf_error("native F32 execution does not implement operator '%s'", op);
+        }
+        SEXP refs = rllm_list_elt(node, "inputs");
+        if (TYPEOF(refs) != STRSXP || XLENGTH(refs) < 1) {
+            Rf_error("native F32 node has invalid input references");
+        }
+        for (R_xlen_t j = 0; j < XLENGTH(refs); ++j) {
+            if (STRING_ELT(refs, j) == NA_STRING) {
+                Rf_error("native F32 node has an invalid input reference");
+            }
+            const char *id = CHAR(STRING_ELT(refs, j));
+            int found = 0;
+            for (int k = 0; k < i; ++k) {
+                if (!strcmp(rllm_string(VECTOR_ELT(nodes, k), "id"), id)) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) Rf_error("native F32 node refers to a later or unknown input");
+        }
+    }
+}
+
+static struct rllm_f32_context *rllm_f32_context_get(
+    SEXP ext, SEXP execution, SEXP backend_context, int backend_code,
+    int channels, int sequence_length, int batch)
+{
+    if (TYPEOF(ext) != EXTPTRSXP ||
+        R_ExternalPtrTag(ext) != rllm_f32_context_tag()) return NULL;
+    SEXP owner = R_ExternalPtrProtected(ext);
+    if (TYPEOF(owner) != VECSXP || XLENGTH(owner) != (backend_code == 3 ? 2 : 1) ||
+        VECTOR_ELT(owner, 0) != execution ||
+        (backend_code == 3 && VECTOR_ELT(owner, 1) != backend_context)) return NULL;
+    struct rllm_f32_context *ctx =
+        (struct rllm_f32_context *) R_ExternalPtrAddr(ext);
+    if (!ctx || ctx->backend_code != backend_code || ctx->channels != channels ||
+        ctx->sequence_length != sequence_length || ctx->batch != batch ||
+        !ctx->backend || !ctx->cctx || !ctx->cbuf || !ctx->graph ||
+        !ctx->input || !ctx->output || !ctx->input_host || !ctx->output_host) {
+        return NULL;
+    }
+    return ctx;
+}
+
+static void rllm_f32_copy_input(float *dst, SEXP sequence, int channels,
+                                 int sequence_length, int batch)
+{
+    for (int b = 0; b < batch; ++b) {
+        for (int c = 0; c < channels; ++c) {
+            for (int s = 0; s < sequence_length; ++s) {
+                R_xlen_t source = c + (R_xlen_t) s * channels +
+                    (R_xlen_t) b * channels * sequence_length;
+                R_xlen_t target = s + (R_xlen_t) c * sequence_length +
+                    (R_xlen_t) b * sequence_length * channels;
+                dst[target] = TYPEOF(sequence) == REALSXP
+                    ? (float) REAL(sequence)[source] : (float) INTEGER(sequence)[source];
+            }
+        }
+    }
+}
+
+static SEXP rllm_f32_result(struct rllm_f32_context *ctx)
+{
+    SEXP dim = PROTECT(Rf_allocVector(INTSXP, 3));
+    for (int i = 0; i < 3; ++i) INTEGER(dim)[i] = ctx->output_dim[i];
+    SEXP output = PROTECT(Rf_allocArray(REALSXP, dim));
+    for (R_xlen_t i = 0; i < ctx->output_count; ++i) {
+        REAL(output)[i] = ctx->output_host[i];
+    }
+    SEXP named = PROTECT(Rf_allocVector(VECSXP, 1));
+    SET_VECTOR_ELT(named, 0, output);
+    SEXP names = PROTECT(Rf_allocVector(STRSXP, 1));
+    SET_STRING_ELT(names, 0, Rf_mkChar(ctx->output_name));
+    Rf_setAttrib(named, R_NamesSymbol, names);
+    UNPROTECT(4);
+    return named;
+}
+
+static SEXP rllm_f32_context_build(SEXP execution, int channels,
+                                   int sequence_length, int batch,
+                                   int backend_code, SEXP backend_context)
+{
+    SEXP program = rllm_list_elt(execution, "program");
+    SEXP tensors = rllm_list_elt(execution, "bindings");
+    SEXP nodes = rllm_list_elt(program, "nodes");
+    SEXP outputs = rllm_list_elt(program, "outputs");
+    const int use_device = backend_code == 3;
+    if (TYPEOF(tensors) != VECSXP || TYPEOF(nodes) != VECSXP ||
+        XLENGTH(nodes) < 2 || XLENGTH(nodes) > 256 ||
+        TYPEOF(outputs) != VECSXP || XLENGTH(outputs) != 1) {
+        Rf_error("invalid native F32 program bindings");
+    }
+    int n_nodes = (int) XLENGTH(nodes);
+    SEXP first = VECTOR_ELT(nodes, 0);
+    if (strcmp(rllm_string(first, "op"), "input") ||
+        strcmp(rllm_string(rllm_list_elt(first, "attributes"), "name"), "sequence") ||
+        strcmp(rllm_string(first, "dtype"), "f32")) {
+        Rf_error("native F32 programs must begin with input 'sequence' of type f32");
+    }
+    rllm_f32_validate_dataflow(nodes);
+    R_xlen_t input_count;
+    size_t input_bytes;
+    if (rllm_f32_product3(channels, sequence_length, batch, &input_count, &input_bytes)) {
+        Rf_error("native F32 input extent overflows allocation bounds");
+    }
+
+    Rggml_context_create_fun ctx_create = Rggml_context_create_ptr();
+    Rggml_context_free_fun ctx_free = Rggml_context_free_ptr();
+    Rggml_new_tensor_fun new_tensor = Rggml_new_tensor_ptr();
+    Rggml_tensor_overhead_fun t_over = Rggml_tensor_overhead_ptr();
+    Rggml_graph_overhead_fun g_over = Rggml_graph_overhead_ptr();
+    Rggml_new_graph_fun new_graph = Rggml_new_graph_ptr();
+    Rggml_build_forward_expand_fun expand = Rggml_build_forward_expand_ptr();
+    Rggml_backend_cpu_init_fun cpu_init = Rggml_backend_cpu_init_ptr();
+    Rggml_backend_free_fun bfree = Rggml_backend_free_ptr();
+    Rggml_backend_alloc_ctx_tensors_fun alloc_tensors =
+        Rggml_backend_alloc_ctx_tensors_ptr();
+    Rggml_backend_buffer_free_fun buf_free = Rggml_backend_buffer_free_ptr();
+    Rggml_backend_tensor_set_fun tensor_set = Rggml_backend_tensor_set_ptr();
+    Rggml_add_fun add = Rggml_add_ptr();
+    Rggml_mul_fun mul = Rggml_mul_ptr();
+    Rggml_conv_1d_fun conv1d = Rggml_conv_1d_ptr();
+    Rggml_conv_1d_f32_plan_create_fun conv_plan_create =
+        Rggml_conv_1d_f32_plan_create_ptr();
+    Rggml_conv_1d_f32_plan_apply_fun conv_plan_apply =
+        Rggml_conv_1d_f32_plan_apply_ptr();
+    Rggml_conv_1d_f32_plan_destroy_fun conv_plan_destroy =
+        Rggml_conv_1d_f32_plan_destroy_ptr();
+    Rggml_leaky_relu_fun leaky_relu = Rggml_leaky_relu_ptr();
+    Rggml_soft_max_fun soft_max = Rggml_soft_max_ptr();
+    Rggml_permute_fun permute = Rggml_permute_ptr();
+    Rggml_cont_fun cont = Rggml_cont_ptr();
+    Rggml_view_3d_fun view_3d = Rggml_view_3d_ptr();
+    Rfmalloc_storage_data_fun storage_data = Rfmalloc_storage_data_ptr();
+
+    struct rllm_f32_context *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) Rf_error("native F32 execution context allocation failed");
+    ctx->backend_code = backend_code;
+    ctx->own_backend = !use_device;
+    ctx->channels = channels;
+    ctx->sequence_length = sequence_length;
+    ctx->batch = batch;
+    ctx->input_count = input_count;
+    ctx->context_free = ctx_free;
+    ctx->buffer_free = buf_free;
+    ctx->backend_free = bfree;
+    ctx->conv_plan_destroy = conv_plan_destroy;
+    struct rllm_cuda_context *cuda_ctx = use_device
+        ? rllm_cuda_context_get(backend_context, tensors) : NULL;
+    ctx->backend = use_device ? cuda_ctx->backend : cpu_init();
+    if (!ctx->backend) {
+        rllm_f32_context_destroy(ctx);
+        Rf_error(use_device ? "CUDA backend unavailable" : "CPU backend unavailable");
+    }
+    size_t graph_size = (size_t) n_nodes * 16 + 64;
+    size_t metadata = 0, part, wmetadata, graph_overhead = g_over(graph_size);
+    if (rllm_f32_mul_size(graph_size + 64, t_over(), &metadata) ||
+        rllm_f32_mul_size((size_t) XLENGTH(tensors) + 16, t_over(), &wmetadata) ||
+        metadata > SIZE_MAX - wmetadata || graph_overhead > SIZE_MAX - 4096 ||
+        (metadata += wmetadata) > SIZE_MAX - (graph_overhead + 4096) ||
+        wmetadata > SIZE_MAX - 4096) {
+        rllm_f32_context_destroy(ctx);
+        Rf_error("native F32 graph metadata allocation overflows size_t");
+    }
+    metadata += graph_overhead + 4096;
+    ctx->wctx = use_device ? NULL : ctx_create(wmetadata + 4096, 1);
+    ctx->cctx = ctx_create(metadata, 1);
+    if (!ctx->cctx || (!use_device && !ctx->wctx)) {
+        rllm_f32_context_destroy(ctx);
+        Rf_error("native F32 fixed graph context creation failed");
+    }
+    ctx->input_host = malloc(input_bytes);
+    if (!ctx->input_host) {
+        rllm_f32_context_destroy(ctx);
+        Rf_error("native F32 input staging allocation failed");
+    }
+    const int max_uploads = 2 * n_nodes + 8;
+    struct rllm_f32_upload *uploads = calloc((size_t) max_uploads, sizeof(*uploads));
+    struct ggml_tensor **values = calloc((size_t) n_nodes, sizeof(*values));
+    if (!use_device) ctx->conv_plans = calloc((size_t) n_nodes, sizeof(*ctx->conv_plans));
+    if (!uploads || !values || (!use_device && !ctx->conv_plans)) {
+        free(values); rllm_f32_upload_release(uploads, max_uploads);
+        rllm_f32_context_destroy(ctx);
+        Rf_error("native F32 graph table allocation failed");
+    }
+    int n_uploads = 0;
+#define RLLM_FX_FAIL(...) do { rllm_f32_upload_release(uploads, n_uploads); free(values); rllm_f32_context_destroy(ctx); Rf_error(__VA_ARGS__); } while (0)
+#define RLLM_FX_CHECK(x) do { if (!(x)) RLLM_FX_FAIL("native F32 graph construction failed (%s)", #x); } while (0)
+
+    int64_t input_ne[3] = { sequence_length, channels, batch };
+    ctx->input = new_tensor(ctx->cctx, GGML_TYPE_F32, 3, input_ne, NULL);
+    RLLM_FX_CHECK(ctx->input);
+    values[0] = ctx->input;
+    for (int i = 1; i < n_nodes; ++i) {
+        SEXP node = VECTOR_ELT(nodes, i);
+        SEXP attributes = rllm_list_elt(node, "attributes");
+        const char *op = rllm_string(node, "op");
+        if (!strcmp(op, "conv1d")) {
+            struct ggml_tensor *x = rllm_f32_source(values, nodes, i, node, 0);
+            const char *weight_name = rllm_f32_parameter(attributes, "weight");
+            const char *bias_name = rllm_f32_parameter(attributes, "bias");
+            int dilation = rllm_integer(attributes, "dilation");
+            int padding = rllm_integer(attributes, "padding");
+            int stride = rllm_integer(attributes, "stride");
+            struct ggml_tensor *weight = rllm_named_weight(
+                use_device ? cuda_ctx->wctx : ctx->wctx, tensors, weight_name,
+                new_tensor, storage_data, NULL, NULL, 0, cuda_ctx);
+            if (!weight || weight->ne[1] != x->ne[1] || dilation < 1 ||
+                padding < 0 || stride < 1 || weight->ne[2] > INT_MAX) {
+                RLLM_FX_FAIL("native F32 convolution dimensions are inconsistent");
+            }
+            int out_channels = (int) weight->ne[2];
+            size_t bias_bytes;
+            const float *bias = rllm_f32_parameter_data(tensors, bias_name,
+                out_channels, &bias_bytes, storage_data);
+            if (!use_device) {
+                /* The CPU primitive copies and repacks the borrowed [K, IC, OC]
+                 * mapping once. The graph then holds only the opaque plan; no
+                 * R object or R API crosses a GGML worker callback. */
+                size_t kernel_bytes;
+                const float *kernel = rllm_f32_parameter_data(tensors, weight_name,
+                    1, &kernel_bytes, storage_data);
+                Rggml_conv_1d_f32_plan *plan = conv_plan_create(kernel,
+                    kernel_bytes, bias, bias_bytes, weight->ne[0], weight->ne[1],
+                    weight->ne[2], stride, padding, dilation, weight->ne[2]);
+                if (plan) {
+                    if (ctx->n_conv_plans >= n_nodes) {
+                        conv_plan_destroy(plan);
+                        RLLM_FX_FAIL("native F32 packed convolution plan table overflow");
+                    }
+                    ctx->conv_plans[ctx->n_conv_plans++] = plan;
+                    values[i] = conv_plan_apply(ctx->cctx, plan, x);
+                    RLLM_FX_CHECK(values[i]);
+                    continue;
+                }
+            }
+            /* CUDA custom callbacks are not CUDA operations. CUDA, and a CPU
+             * shape that cannot admit a direct plan, keep the official F32
+             * im2col/mul_mat composition as the independent fallback. */
+            values[i] = conv1d(ctx->cctx, weight, x, stride, padding, dilation);
+            RLLM_FX_CHECK(values[i]);
+            int64_t affine_ne[3] = { 1, out_channels, 1 };
+            struct ggml_tensor *bias_tensor = new_tensor(
+                ctx->cctx, GGML_TYPE_F32, 3, affine_ne, NULL);
+            RLLM_FX_CHECK(bias_tensor);
+            rllm_f32_upload_add(uploads, &n_uploads, max_uploads, bias_tensor,
+                                 bias, (size_t) out_channels * sizeof(*bias), NULL);
+            values[i] = add(ctx->cctx, values[i], bias_tensor);
+            RLLM_FX_CHECK(values[i]);
+        } else if (!strcmp(op, "batch_norm")) {
+            struct ggml_tensor *x = rllm_f32_source(values, nodes, i, node, 0);
+            if (x->ne[1] < 1 || x->ne[1] > INT_MAX) {
+                RLLM_FX_FAIL("native F32 batch normalization dimensions are invalid");
+            }
+            int width = (int) x->ne[1];
+            double eps = rllm_number(attributes, "eps");
+            const float *weight = rllm_f32_parameter_data(tensors,
+                rllm_f32_parameter(attributes, "weight"), width, NULL, storage_data);
+            const float *bias = rllm_f32_parameter_data(tensors,
+                rllm_f32_parameter(attributes, "bias"), width, NULL, storage_data);
+            const float *mean = rllm_f32_parameter_data(tensors,
+                rllm_f32_parameter(attributes, "running_mean"), width, NULL, storage_data);
+            const float *variance = rllm_f32_parameter_data(tensors,
+                rllm_f32_parameter(attributes, "running_var"), width, NULL, storage_data);
+            size_t affine_bytes;
+            if (!R_FINITE(eps) || eps <= 0 ||
+                rllm_f32_mul_size((size_t) width, sizeof(float), &affine_bytes)) {
+                RLLM_FX_FAIL("native F32 batch normalization is invalid");
+            }
+            float *scale = malloc(affine_bytes), *shift = malloc(affine_bytes);
+            if (!scale || !shift) { free(scale); free(shift); RLLM_FX_FAIL("native F32 normalization allocation failed"); }
+            for (int j = 0; j < width; ++j) {
+                if (!R_FINITE(variance[j]) || variance[j] < 0) {
+                    free(scale); free(shift);
+                    RLLM_FX_FAIL("native F32 batch normalization variance is invalid");
+                }
+                scale[j] = weight[j] / sqrtf(variance[j] + (float) eps);
+                shift[j] = bias[j] - mean[j] * scale[j];
+            }
+            int64_t affine_ne[3] = { 1, width, 1 };
+            struct ggml_tensor *scale_tensor = new_tensor(ctx->cctx, GGML_TYPE_F32, 3, affine_ne, NULL);
+            struct ggml_tensor *shift_tensor = new_tensor(ctx->cctx, GGML_TYPE_F32, 3, affine_ne, NULL);
+            if (!scale_tensor || !shift_tensor) { free(scale); free(shift); RLLM_FX_FAIL("native F32 graph construction failed (normalization tensors)"); }
+            rllm_f32_upload_add(uploads, &n_uploads, max_uploads, scale_tensor, scale, affine_bytes, scale);
+            rllm_f32_upload_add(uploads, &n_uploads, max_uploads, shift_tensor, shift, affine_bytes, shift);
+            values[i] = add(ctx->cctx, mul(ctx->cctx, x, scale_tensor), shift_tensor);
+            RLLM_FX_CHECK(values[i]);
+        } else if (!strcmp(op, "leaky_relu")) {
+            values[i] = leaky_relu(ctx->cctx,
+                rllm_f32_source(values, nodes, i, node, 0), rllm_number(attributes, "slope"));
+            RLLM_FX_CHECK(values[i]);
+        } else if (!strcmp(op, "add")) {
+            SEXP refs = rllm_list_elt(node, "inputs");
+            if (TYPEOF(refs) != STRSXP || XLENGTH(refs) < 2) RLLM_FX_FAIL("native F32 add needs at least two inputs");
+            values[i] = rllm_f32_source(values, nodes, i, node, 0);
+            for (int j = 1; j < XLENGTH(refs); ++j) {
+                struct ggml_tensor *right = rllm_f32_source(values, nodes, i, node, j);
+                if (!rllm_f32_same_shape(values[i], right)) RLLM_FX_FAIL("native F32 add inputs have different dimensions");
+                values[i] = add(ctx->cctx, values[i], right);
+                RLLM_FX_CHECK(values[i]);
+            }
+        } else if (!strcmp(op, "crop1d")) {
+            struct ggml_tensor *x = rllm_f32_source(values, nodes, i, node, 0);
+            int left = rllm_integer(attributes, "left"), right = rllm_integer(attributes, "right");
+            if (left < 0 || right < 0 || (int64_t) left + right >= x->ne[0]) RLLM_FX_FAIL("native F32 crop extents are invalid");
+            values[i] = view_3d(ctx->cctx, x, x->ne[0] - left - right,
+                x->ne[1], x->ne[2], x->nb[1], x->nb[2], (size_t) left * sizeof(float));
+            RLLM_FX_CHECK(values[i]);
+        } else if (!strcmp(op, "softmax")) {
+            if (strcmp(rllm_string(attributes, "axis"), "feature")) RLLM_FX_FAIL("native F32 softmax needs feature axis");
+            struct ggml_tensor *x = rllm_f32_source(values, nodes, i, node, 0);
+            values[i] = soft_max(ctx->cctx, cont(ctx->cctx, permute(ctx->cctx, x, 1, 0, 2, 3)));
+            RLLM_FX_CHECK(values[i]);
+        } else {
+            RLLM_FX_FAIL("native F32 execution does not implement operator '%s'", op);
+        }
+    }
+    SEXP out_ref = VECTOR_ELT(outputs, 0);
+    if (TYPEOF(out_ref) != STRSXP || XLENGTH(out_ref) != 1 || STRING_ELT(out_ref, 0) == NA_STRING) RLLM_FX_FAIL("native F32 program output id is invalid");
+    const char *out_id = CHAR(STRING_ELT(out_ref, 0));
+    SEXP output_names = Rf_getAttrib(outputs, R_NamesSymbol);
+    if (TYPEOF(output_names) != STRSXP || XLENGTH(output_names) != 1 ||
+        STRING_ELT(output_names, 0) == NA_STRING) RLLM_FX_FAIL("native F32 program output name is invalid");
+    size_t output_name_bytes = strlen(CHAR(STRING_ELT(output_names, 0))) + 1;
+    ctx->output_name = malloc(output_name_bytes);
+    if (!ctx->output_name) RLLM_FX_FAIL("native F32 output name allocation failed");
+    memcpy(ctx->output_name, CHAR(STRING_ELT(output_names, 0)), output_name_bytes);
+    for (int i = 0; i < n_nodes; ++i) {
+        if (!strcmp(rllm_string(VECTOR_ELT(nodes, i), "id"), out_id)) ctx->output = values[i];
+    }
+    if (!ctx->output || ctx->output->ne[0] > INT_MAX || ctx->output->ne[1] > INT_MAX || ctx->output->ne[2] > INT_MAX ||
+        rllm_f32_product3((int) ctx->output->ne[0], (int) ctx->output->ne[1], (int) ctx->output->ne[2], &ctx->output_count, &part)) {
+        RLLM_FX_FAIL("native F32 program output extent is invalid");
+    }
+    for (int i = 0; i < 3; ++i) ctx->output_dim[i] = (int) ctx->output->ne[i];
+    ctx->output_host = malloc(part);
+    if (!ctx->output_host) RLLM_FX_FAIL("native F32 output staging allocation failed");
+    ctx->graph = new_graph(ctx->cctx, graph_size);
+    RLLM_FX_CHECK(ctx->graph);
+    expand(ctx->graph, ctx->output);
+    ctx->cbuf = alloc_tensors(ctx->cctx, ctx->backend);
+    if (!ctx->cbuf) RLLM_FX_FAIL("native F32 fixed backend allocation failed");
+    for (int i = 0; i < n_uploads; ++i) {
+        tensor_set(uploads[i].tensor, uploads[i].data, 0, uploads[i].bytes);
+    }
+    rllm_f32_upload_release(uploads, n_uploads);
+    free(values);
+    SEXP owner = PROTECT(Rf_allocVector(VECSXP, use_device ? 2 : 1));
+    SET_VECTOR_ELT(owner, 0, execution);
+    if (use_device) SET_VECTOR_ELT(owner, 1, backend_context);
+    SEXP ext = PROTECT(R_MakeExternalPtr(ctx, rllm_f32_context_tag(), owner));
+    R_RegisterCFinalizerEx(ext, rllm_f32_context_finalizer, FALSE);
+    UNPROTECT(2);
+    return ext;
+#undef RLLM_FX_CHECK
+#undef RLLM_FX_FAIL
+}
+
+SEXP RC_rllm_f32_program_forward(SEXP execution, SEXP inputs, SEXP threads_sexp,
+                                 SEXP backend_sexp, SEXP backend_context,
+                                 SEXP context_sexp)
+{
+    if (TYPEOF(execution) != VECSXP || TYPEOF(inputs) != VECSXP) {
+        Rf_error("native F32 execution needs program bindings and named inputs");
+    }
+    SEXP sequence = rllm_list_elt(inputs, "sequence");
+    SEXP dim = Rf_getAttrib(sequence, R_DimSymbol);
+    int threads = Rf_asInteger(threads_sexp), backend_code = Rf_asInteger(backend_sexp);
+    if ((TYPEOF(sequence) != REALSXP && TYPEOF(sequence) != INTSXP) ||
+        TYPEOF(dim) != INTSXP || XLENGTH(dim) != 3 || threads == NA_INTEGER || threads < 1 ||
+        (backend_code != 0 && backend_code != 3)) {
+        Rf_error("invalid native F32 input, thread count, or backend");
+    }
+    int channels = INTEGER(dim)[0], sequence_length = INTEGER(dim)[1], batch = INTEGER(dim)[2];
+    R_xlen_t input_count;
+    size_t ignored;
+    if (rllm_f32_product3(channels, sequence_length, batch, &input_count, &ignored) ||
+        XLENGTH(sequence) != input_count) {
+        Rf_error("native F32 input extent is invalid");
+    }
+    struct rllm_f32_context *ctx = rllm_f32_context_get(context_sexp, execution,
+        backend_context, backend_code, channels, sequence_length, batch);
+    SEXP ext = context_sexp;
+    if (!ctx) {
+        ext = PROTECT(rllm_f32_context_build(execution, channels, sequence_length,
+                                             batch, backend_code, backend_context));
+        ctx = (struct rllm_f32_context *) R_ExternalPtrAddr(ext);
+    } else {
+        PROTECT(ext);
+    }
+    if (backend_code == 0) Rggml_backend_cpu_set_n_threads_ptr()(ctx->backend, threads);
+    rllm_f32_copy_input(ctx->input_host, sequence, channels, sequence_length, batch);
+    Rggml_backend_tensor_set_ptr()(ctx->input, ctx->input_host, 0,
+                                   (size_t) ctx->input_count * sizeof(float));
+    if (Rggml_backend_graph_compute_ptr()(ctx->backend, ctx->graph) != 0) {
+        UNPROTECT(1);
+        Rf_error("native F32 graph compute failed");
+    }
+    Rggml_backend_tensor_get_ptr()(ctx->output, ctx->output_host, 0,
+                                   (size_t) ctx->output_count * sizeof(float));
+    SEXP result = PROTECT(rllm_f32_result(ctx));
+    SEXP answer = PROTECT(Rf_allocVector(VECSXP, 2));
+    SET_VECTOR_ELT(answer, 0, result);
+    SET_VECTOR_ELT(answer, 1, ext);
+    UNPROTECT(3);
+    return answer;
+}

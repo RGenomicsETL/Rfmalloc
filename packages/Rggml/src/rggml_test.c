@@ -17,6 +17,8 @@
 
 #include <Rggml.h>
 
+#include "rggml_conv1d.h"
+
 SEXP RC_rggml_version(void)
 {
     Rggml_version_fun version_fn = Rggml_version_ptr();
@@ -737,4 +739,210 @@ SEXP RC_rggml_cpu_info(void)
     Rf_setAttrib(out, R_NamesSymbol, nm);
     UNPROTECT(2);
     return out;
+}
+
+/* Focused differential proof for the persistent packed F32 conv1d primitive.
+ * It intentionally resolves every public operation through R_GetCCallable(),
+ * including plan creation/application, so this remains a downstream ABI test.
+ */
+static int
+rggml_test_conv_output_length(int64_t input, int stride, int padding,
+                              int dilation, int64_t kernel, int64_t *output)
+{
+    int64_t effective;
+    if (input < 1 || stride < 1 || padding < 0 || dilation < 1 || kernel < 1 ||
+        padding > (INT64_MAX - input) / 2 ||
+        kernel - 1 > (INT64_MAX - 1) / dilation) {
+        return -1;
+    }
+    effective = (kernel - 1) * dilation + 1;
+    if (input + 2 * (int64_t) padding < effective) return -1;
+    *output = (input + 2 * (int64_t) padding - effective) / stride + 1;
+    return *output < 1 ? -1 : 0;
+}
+
+static int
+rggml_test_conv_compute(const float *kernel, const float *bias, const float *input,
+    int64_t k, int64_t ic, int64_t oc, int64_t n, int64_t batch,
+    int stride, int padding, int dilation, int scalar_only, int upstream,
+    float *output, size_t output_bytes)
+{
+    Rggml_context_create_fun context_create = Rggml_context_create_ptr();
+    Rggml_context_free_fun context_free = Rggml_context_free_ptr();
+    Rggml_tensor_overhead_fun tensor_overhead = Rggml_tensor_overhead_ptr();
+    Rggml_graph_overhead_fun graph_overhead = Rggml_graph_overhead_ptr();
+    Rggml_new_tensor_fun new_tensor = Rggml_new_tensor_ptr();
+    Rggml_new_graph_fun new_graph = Rggml_new_graph_ptr();
+    Rggml_build_forward_expand_fun expand = Rggml_build_forward_expand_ptr();
+    Rggml_backend_alloc_ctx_tensors_fun alloc = Rggml_backend_alloc_ctx_tensors_ptr();
+    Rggml_backend_buffer_free_fun buffer_free = Rggml_backend_buffer_free_ptr();
+    Rggml_backend_tensor_set_fun tensor_set = Rggml_backend_tensor_set_ptr();
+    Rggml_backend_tensor_get_fun tensor_get = Rggml_backend_tensor_get_ptr();
+    Rggml_backend_cpu_init_fun cpu_init = Rggml_backend_cpu_init_ptr();
+    Rggml_backend_free_fun backend_free = Rggml_backend_free_ptr();
+    Rggml_backend_graph_compute_fun compute = Rggml_backend_graph_compute_ptr();
+    Rggml_conv_1d_fun oracle_conv = Rggml_conv_1d_ptr();
+    Rggml_add_fun add = Rggml_add_ptr();
+    Rggml_conv_1d_f32_plan_create_fun plan_create = Rggml_conv_1d_f32_plan_create_ptr();
+    Rggml_conv_1d_f32_plan_destroy_fun plan_destroy = Rggml_conv_1d_f32_plan_destroy_ptr();
+    Rggml_conv_1d_f32_plan_apply_fun plan_apply = Rggml_conv_1d_f32_plan_apply_ptr();
+    struct ggml_context *ctx = NULL;
+    ggml_backend_t backend = NULL;
+    ggml_backend_buffer_t buffer = NULL;
+    Rggml_conv_1d_f32_plan *plan = NULL;
+    struct ggml_tensor *x, *result;
+    int64_t input_ne[3] = { n, ic, batch };
+    int64_t kernel_ne[3] = { k, ic, oc };
+    int64_t bias_ne[3] = { 1, oc, 1 };
+    size_t metadata;
+    int status = -1;
+
+    if (n > INT64_MAX / ic || n * ic > INT64_MAX / batch ||
+        (size_t) n * ic > SIZE_MAX / (size_t) batch ||
+        (size_t) n * ic * batch > SIZE_MAX / sizeof(float) ||
+        (size_t) k * ic > SIZE_MAX / (size_t) oc ||
+        (size_t) k * ic * oc > SIZE_MAX / sizeof(float)) return -1;
+    metadata = 16 * tensor_overhead() + graph_overhead(32) + 4096;
+    ctx = context_create(metadata, 1);
+    backend = cpu_init();
+    if (!ctx || !backend) goto done;
+    x = new_tensor(ctx, GGML_TYPE_F32, 3, input_ne, NULL);
+    if (!x) goto done;
+    if (upstream) {
+        struct ggml_tensor *w = new_tensor(ctx, GGML_TYPE_F32, 3, kernel_ne, (void *) kernel);
+        struct ggml_tensor *b = new_tensor(ctx, GGML_TYPE_F32, 3, bias_ne, NULL);
+        if (!w || !b || !(result = oracle_conv(ctx, w, x, stride, padding, dilation))) goto done;
+        result = add(ctx, result, b);
+        if (!result) goto done;
+    } else {
+        plan = plan_create(kernel, (size_t) k * ic * oc * sizeof(float), bias,
+                           (size_t) oc * sizeof(float), k, ic, oc, stride,
+                           padding, dilation, oc);
+        if (!plan) goto done;
+        plan->scalar_only = scalar_only;
+        result = plan_apply(ctx, plan, x);
+        if (!result) goto done;
+    }
+    struct ggml_cgraph *graph = new_graph(ctx, 32);
+    if (!graph) goto done;
+    expand(graph, result);
+    buffer = alloc(ctx, backend);
+    if (!buffer) goto done;
+    tensor_set(x, input, 0, (size_t) n * ic * batch * sizeof(float));
+    if (upstream) {
+        /* The bias is the only backend-owned leaf after allocation. It is
+         * the second source of the final add node. */
+        tensor_set(result->src[1], bias, 0, (size_t) oc * sizeof(float));
+    }
+    if (compute(backend, graph) != 0) goto done;
+    tensor_get(result, output, 0, output_bytes);
+    status = 0;
+done:
+    if (plan) plan_destroy(plan);
+    if (buffer) buffer_free(buffer);
+    if (backend) backend_free(backend);
+    if (ctx) context_free(ctx);
+    return status;
+}
+
+SEXP
+RC_rggml_test_conv1d_f32(SEXP kernel_sexp, SEXP input_sexp, SEXP bias_sexp,
+                         SEXP stride_sexp, SEXP padding_sexp, SEXP dilation_sexp)
+{
+    SEXP kd = Rf_getAttrib(kernel_sexp, R_DimSymbol);
+    SEXP xd = Rf_getAttrib(input_sexp, R_DimSymbol);
+    int stride = Rf_asInteger(stride_sexp), padding = Rf_asInteger(padding_sexp);
+    int dilation = Rf_asInteger(dilation_sexp);
+    int64_t k, ic, oc, n, batch, nout;
+    size_t kernel_count, input_count, output_count, output_bytes;
+
+    if (TYPEOF(kernel_sexp) != REALSXP || TYPEOF(input_sexp) != REALSXP ||
+        TYPEOF(bias_sexp) != REALSXP || TYPEOF(kd) != INTSXP ||
+        TYPEOF(xd) != INTSXP || XLENGTH(kd) != 3 || XLENGTH(xd) != 3 ||
+        stride == NA_INTEGER || padding == NA_INTEGER || dilation == NA_INTEGER) {
+        Rf_error("conv1d test needs numeric [K, IC, OC] kernel, [N, IC, B] input, and bias");
+    }
+    k = INTEGER(kd)[0]; ic = INTEGER(kd)[1]; oc = INTEGER(kd)[2];
+    n = INTEGER(xd)[0]; batch = INTEGER(xd)[2];
+    if (k < 1 || ic < 1 || oc < 1 || n < 1 || batch < 1 ||
+        INTEGER(xd)[1] != ic || XLENGTH(bias_sexp) != oc ||
+        rggml_test_conv_output_length(n, stride, padding, dilation, k, &nout) ||
+        (size_t) k > SIZE_MAX / (size_t) ic ||
+        (kernel_count = (size_t) k * ic) > SIZE_MAX / (size_t) oc ||
+        (kernel_count *= (size_t) oc) != (size_t) XLENGTH(kernel_sexp) ||
+        (size_t) n > SIZE_MAX / (size_t) ic ||
+        (input_count = (size_t) n * ic) > SIZE_MAX / (size_t) batch ||
+        (input_count *= (size_t) batch) != (size_t) XLENGTH(input_sexp) ||
+        (size_t) nout > SIZE_MAX / (size_t) oc ||
+        (output_count = (size_t) nout * oc) > SIZE_MAX / (size_t) batch ||
+        (output_count *= (size_t) batch) > SIZE_MAX / sizeof(float)) {
+        Rf_error("conv1d test dimensions are invalid or overflow");
+    }
+    output_bytes = output_count * sizeof(float);
+    float *kernel = (float *) R_alloc(kernel_count, sizeof(*kernel));
+    float *input = (float *) R_alloc(input_count, sizeof(*input));
+    float *bias = (float *) R_alloc((size_t) oc, sizeof(*bias));
+    float *direct = (float *) R_alloc(output_count, sizeof(*direct));
+    float *scalar = (float *) R_alloc(output_count, sizeof(*scalar));
+    float *oracle = (float *) R_alloc(output_count, sizeof(*oracle));
+    for (size_t i = 0; i < kernel_count; ++i) kernel[i] = (float) REAL(kernel_sexp)[i];
+    for (size_t i = 0; i < input_count; ++i) input[i] = (float) REAL(input_sexp)[i];
+    for (int64_t i = 0; i < oc; ++i) bias[i] = (float) REAL(bias_sexp)[i];
+    if (rggml_test_conv_compute(kernel, bias, input, k, ic, oc, n, batch,
+            stride, padding, dilation, 0, 0, direct, output_bytes) ||
+        rggml_test_conv_compute(kernel, bias, input, k, ic, oc, n, batch,
+            stride, padding, dilation, 1, 0, scalar, output_bytes) ||
+        rggml_test_conv_compute(kernel, bias, input, k, ic, oc, n, batch,
+            stride, padding, dilation, 0, 1, oracle, output_bytes)) {
+        Rf_error("native conv1d differential graph construction or compute failed");
+    }
+    SEXP dim = PROTECT(Rf_allocVector(INTSXP, 3));
+    INTEGER(dim)[0] = (int) nout; INTEGER(dim)[1] = (int) oc; INTEGER(dim)[2] = (int) batch;
+    SEXP result = PROTECT(Rf_allocVector(VECSXP, 3));
+    SEXP names = PROTECT(Rf_allocVector(STRSXP, 3));
+    const char *labels[] = { "direct", "scalar", "im2col" };
+    float *sets[] = { direct, scalar, oracle };
+    for (int set = 0; set < 3; ++set) {
+        SEXP values = PROTECT(Rf_allocArray(REALSXP, dim));
+        for (size_t i = 0; i < output_count; ++i) REAL(values)[i] = sets[set][i];
+        SET_VECTOR_ELT(result, set, values);
+        SET_STRING_ELT(names, set, Rf_mkChar(labels[set]));
+        UNPROTECT(1);
+    }
+    Rf_setAttrib(result, R_NamesSymbol, names);
+    UNPROTECT(3);
+    return result;
+}
+
+SEXP
+RC_rggml_test_conv1d_f32_bounds(void)
+{
+    Rggml_conv_1d_f32_plan_create_fun create = Rggml_conv_1d_f32_plan_create_ptr();
+    Rggml_conv_1d_f32_plan_destroy_fun destroy = Rggml_conv_1d_f32_plan_destroy_ptr();
+    Rggml_conv_1d_f32_plan_apply_fun apply = Rggml_conv_1d_f32_plan_apply_ptr();
+    Rggml_context_create_fun context_create = Rggml_context_create_ptr();
+    Rggml_context_free_fun context_free = Rggml_context_free_ptr();
+    Rggml_new_tensor_fun new_tensor = Rggml_new_tensor_ptr();
+    Rggml_tensor_overhead_fun overhead = Rggml_tensor_overhead_ptr();
+    float value[] = { 1.0f, 1.0f };
+    int64_t ne[3] = { 5, 2, 1 };
+    Rggml_conv_1d_f32_plan *plan = create(value, sizeof(value[0]), NULL, 0,
+        1, 1, 1, 1, 0, 1, 1);
+    struct ggml_context *ctx = context_create(4 * overhead() + 1024, 1);
+    struct ggml_tensor *wrong_channels = ctx
+        ? new_tensor(ctx, GGML_TYPE_F32, 3, ne, NULL) : NULL;
+    int ok[] = {
+        create(NULL, 0, NULL, 0, 1, 1, 1, 1, 0, 1, 1) == NULL,
+        create(value, sizeof(value), NULL, 0, INT64_MAX, 2, 1, 1, 0, 1, 1) == NULL,
+        create(value, sizeof(value), NULL, 0, 1, 1, 65537, 1, 0, 1, 65537) == NULL,
+        create(value, sizeof(value), NULL, 0, 2, 1, 1, 1, 0,
+               INT64_MAX, 1) == NULL,
+        plan != NULL && wrong_channels != NULL && apply(ctx, plan, wrong_channels) == NULL
+    };
+    if (plan) destroy(plan);
+    if (ctx) context_free(ctx);
+    SEXP result = PROTECT(Rf_allocVector(LGLSXP, 5));
+    for (int i = 0; i < 5; ++i) LOGICAL(result)[i] = ok[i];
+    UNPROTECT(1);
+    return result;
 }

@@ -57,9 +57,17 @@ reference <- matrix(c(
     1, 1.28549893e-10, 6.48963938e-11
 ), nrow = 3L)
 
+native <- Rllm:::.rllm_f32_forward(
+    Rllm:::.rllm_f32_model(path, runtime = runtime), list(sequence = input),
+    threads = 1L
+)$probabilities
+
 expect_equal(length(program$parameters), 56L)
 expect_equal(dim(result), c(3L, 16L, 1L))
+expect_equal(dim(native), c(3L, 16L, 1L))
+expect_true(max(abs(native - result)) < 5e-7)
 expect_true(max(abs(result[, , 1L] - reference)) < 5e-7)
+expect_true(max(abs(native[, , 1L] - reference)) < 5e-7)
 expect_true(max(abs(colSums(result[, , 1L]) - 1)) < 1e-12)
 expect_error(
     Rllm:::.rllm_lower_program(

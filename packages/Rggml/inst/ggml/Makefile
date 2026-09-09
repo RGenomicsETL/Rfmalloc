@@ -116,9 +116,10 @@ CPU_CORE_OBJECTS = ggml-cpu/ggml-cpu-c.o ggml-cpu/ggml-cpu-cpp.o
 SIMD_DIR = ../../tools/simd
 SIMD_EXTRA_OBJECTS ?=
 SIMD_DISPATCH_DEFS ?=
-# Emptied by configure on aarch64 and wasm, where GGML's native translation
-# units already define the canonical quant symbols.
-DISPATCH_OBJECTS ?= cpu_features.o rggml_simd_dispatch.o
+# Configure retains the conv1d dispatcher everywhere for its portable fallback.
+# It omits only the quant dispatcher on aarch64 and wasm, where GGML's native
+# translation units already define the canonical quant symbols.
+DISPATCH_OBJECTS ?= cpu_features.o rggml_simd_dispatch.o rggml_conv1d_simd_dispatch.o
 
 OBJECTS = $(C_SOURCES:.c=.o) $(CXX_SOURCES:.cpp=.o) $(CPU_CORE_OBJECTS) \
           rggml_io.o $(BLAS_OBJECTS) \
@@ -165,6 +166,12 @@ cpu_features.o: $(SIMD_DIR)/cpu_features.c
 rggml_simd_dispatch.o: $(SIMD_DIR)/rggml_simd_dispatch.c
 	$(CC) $(CPPFLAGS) -I$(SIMD_DIR) $(SIMD_DISPATCH_DEFS) $(CFLAGS) -c $< -o $@
 
+# The generic front end owns the scalar fallback. Its AVX2/FMA row kernel is
+# staged separately and reached only through the same complete predicate as
+# GGML's upstream AVX2 object.
+rggml_conv1d_simd_dispatch.o: $(SIMD_DIR)/rggml_conv1d_simd_dispatch.c
+	$(CC) $(CPPFLAGS) $(INCLUDES) -I$(SIMD_DIR) -I../../src $(SIMD_DISPATCH_DEFS) $(CFLAGS) -c $< -o $@
+
 X86_SIMD_FLAGS = -msse4.2 -mf16c -mfma -mbmi2 -mavx -mavx2
 
 # The complete official x86 quant implementation. Every external definition
@@ -173,6 +180,9 @@ rggml_x86_avx2.o: ggml-cpu/arch/x86/quants.c $(SIMD_DIR)/rggml_simd_rename_x86.h
 	$(CC) $(ALL_CFLAGS) -UGGML_CPU_GENERIC \
 	    -include $(SIMD_DIR)/rggml_simd_rename_x86.h \
 	    $(X86_SIMD_FLAGS) -O3 -c $< -o $@
+
+rggml_conv1d_x86_avx2.o: $(SIMD_DIR)/rggml_conv1d_avx2.c
+	$(CC) $(CPPFLAGS) $(INCLUDES) -I../../src $(X86_SIMD_FLAGS) -O3 -c $< -o $@
 
 %.o: %.c
 	$(CC) $(ALL_CFLAGS) -c $< -o $@

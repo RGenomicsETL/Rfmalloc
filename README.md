@@ -95,7 +95,7 @@ round(c(
   peak_mmap_MB = peak_mapped
 ))
 #>   payload_MB peak_heap_MB peak_mmap_MB 
-#>          610          697           87
+#>          610          697           86
 identical(sv_mapped, sv_heap)
 #> [1] TRUE
 ```
@@ -257,10 +257,13 @@ through an explicit operator table. A dense oracle executes the TRM
 agrees with direct R iteration. It is the semantic oracle for the native
 bound-program lowering, not a second GGUF runtime. Official ESM-2 and
 OpenSpliceAI checkpoints now cross complete dense numerical oracles
-through Rgguf; their native GGML lowerings remain explicit work. Evo
-still needs a checkpoint importer and numerical lowering, while TRM
-still needs its full bidirectional-attention lowering. Those absences
-remain named operator failures instead of becoming architecture
+through Rgguf. OpenSpliceAI also has an internal fixed-shape F32
+lowering whose complete output agrees with that oracle and with upstream
+PyTorch within 5e-7; it stays unexported because it reaches only 24.2%
+of upstream CPU throughput. The ESM-2 native lowering remains explicit
+work. Evo still needs a checkpoint importer and numerical lowering,
+while TRM still needs its full bidirectional-attention lowering. Those
+absences remain named operator failures instead of becoming architecture
 switches.
 
 [Rtinycc](https://github.com/sounkou-bioinfo/Rtinycc) gives this

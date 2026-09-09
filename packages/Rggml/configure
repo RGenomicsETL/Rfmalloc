@@ -141,17 +141,19 @@ X86_SIMD_FLAGS="-msse4.2 -mf16c -mfma -mbmi2 -mavx -mavx2"
 if [ "$IS_X86" = "1" ] && \
         $CC $X86_SIMD_FLAGS "$_probe_c" -o "${_probe_c}.out" >/dev/null 2>&1; then
     echo "SIMD: staging GGML's upstream AVX2 Q4_K kernel"
-    SIMD_EXTRA_OBJECTS="$SIMD_EXTRA_OBJECTS rggml_x86_avx2.o"
+    SIMD_EXTRA_OBJECTS="$SIMD_EXTRA_OBJECTS rggml_x86_avx2.o rggml_conv1d_x86_avx2.o"
     SIMD_DISPATCH_DEFS="$SIMD_DISPATCH_DEFS -DRGGML_HAVE_X86_AVX2"
 fi
 # aarch64 (Apple Silicon, ARM Linux/Graviton, Windows-on-ARM): NEON is a
 # mandatory baseline, so we compile GGML's own hand-tuned NEON kernels
 # unconditionally. They cover every quantized type and supersede the generic
-# runtime dispatcher.
+# runtime dispatcher. The conv1d dispatcher is always built because its
+# portable fallback is part of Rggml. The quant dispatcher is omitted on these
+# architectures because their native units define its canonical symbols.
 GENERIC_DEFS="-DGGML_CPU_GENERIC"
 ARCH_OBJECTS=""
 ARCH_FLAGS=""
-DISPATCH_OBJECTS="cpu_features.o rggml_simd_dispatch.o"
+DISPATCH_OBJECTS="cpu_features.o rggml_simd_dispatch.o rggml_conv1d_simd_dispatch.o"
 # Recorded into the R-visible binary (see rggml_cpu_info()) so that the branch
 # taken here is asserted by the test suite instead of trusted. A silent fallback
 # to the generic kernels would otherwise produce an identically green build.
@@ -165,7 +167,7 @@ if [ "$IS_ARM" = "1" ]; then
     echo "SIMD: aarch64 - using GGML's native NEON quant kernels"
     GENERIC_DEFS=""
     ARCH_OBJECTS="ggml-cpu/arch/arm/quants.o"
-    DISPATCH_OBJECTS=""
+    DISPATCH_OBJECTS="rggml_conv1d_simd_dispatch.o"
     ARCH_KERNELS_DEF="-DRGGML_ARCH_ARM=1"
     SIMD_DISPATCH_DEF=""
 elif [ "$IS_WASM" = "1" ]; then
@@ -177,7 +179,7 @@ elif [ "$IS_WASM" = "1" ]; then
     GENERIC_DEFS=""
     ARCH_OBJECTS="ggml-cpu/arch/wasm/quants.o"
     ARCH_FLAGS="-msimd128"
-    DISPATCH_OBJECTS=""
+    DISPATCH_OBJECTS="rggml_conv1d_simd_dispatch.o"
     ARCH_KERNELS_DEF="-DRGGML_ARCH_WASM=1"
     SIMD_DISPATCH_DEF=""
 fi

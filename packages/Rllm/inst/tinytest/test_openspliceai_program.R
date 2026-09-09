@@ -88,12 +88,74 @@ expect_equal(
     result$probabilities,
     tolerance = 1e-12
 )
+native_backing <- tempfile(fileext = ".bin")
+native_runtime <- Rfmalloc::open_fmalloc(native_backing, mode = "scratch", size_gb = 0.05)
+native_model <- Rllm:::.rllm_f32_model(path, runtime = native_runtime)
+native <- Rllm:::.rllm_f32_forward(
+    native_model, list(sequence = sequence), threads = 1L
+)$probabilities
+expect_equal(dim(native), c(3L, 8L, 2L))
+expect_equal(native, result$probabilities, tolerance = 2e-4)
+context_key <- "f32:cpu:4x24x2"
+context_two <- native_model$.contexts[[context_key]]
+native_repeat <- Rllm:::.rllm_f32_forward(
+    native_model, list(sequence = sequence), threads = 1L
+)$probabilities
+expect_equal(native_repeat, native, tolerance = 0)
+expect_true(identical(native_model$.contexts[[context_key]], context_two))
+native_one <- Rllm:::.rllm_f32_forward(
+    native_model, list(sequence = sequence[, , 1L, drop = FALSE]), threads = 1L
+)$probabilities
+expect_equal(native_one, native[, , 1L, drop = FALSE], tolerance = 2e-4)
+expect_true(exists("f32:cpu:4x24x1", native_model$.contexts, inherits = FALSE))
+expect_false(identical(
+    native_model$.contexts[["f32:cpu:4x24x1"]], context_two
+))
+expect_equal(
+    apply(native, c(2L, 3L), sum), matrix(1, nrow = 8L, ncol = 2L),
+    tolerance = 2e-6
+)
+expect_error(
+    Rllm:::.rllm_f32_forward(native_model, list(sequence = sequence), threads = 0L),
+    "threads must be one positive integer"
+)
+expect_error(
+    Rllm:::.rllm_f32_forward(native_model, list(other = sequence)),
+    "exactly one input named 'sequence'"
+)
+expect_error(
+    Rllm:::.rllm_f32_forward(native_model, list(sequence = sequence), backend = "cuda"),
+    "CUDA backend unavailable"
+)
+bad_model <- native_model
+add_at <- which(vapply(
+    bad_model$execution$program$nodes, `[[`, character(1), "op"
+) == "add")[[1L]]
+bad_model$execution$program$nodes[[add_at]]$inputs[[1L]] <- "unknown"
+expect_error(
+    Rllm:::.rllm_f32_forward(bad_model, list(sequence = sequence)),
+    "later or unknown input"
+)
 expect_error(
     Rllm:::.rllm_lower_program(
         adapted, list(architecture = "openspliceai")
     ),
     "native program input must be i32 tokens"
 )
-unlink(path)
+# A collected model owns the external pointer and must release its CPU backend,
+# graph buffer, contexts, and staging buffers without touching the next model.
+local({
+    transient <- Rllm:::.rllm_f32_model(path, runtime = native_runtime)
+    Rllm:::.rllm_f32_forward(transient, list(sequence = sequence), threads = 1L)
+})
+gc()
+expect_equal(
+    Rllm:::.rllm_f32_forward(native_model, list(sequence = sequence), threads = 1L)$probabilities,
+    native, tolerance = 0
+)
+rm(native_model, context_two)
+gc()
+Rfmalloc::cleanup_fmalloc(native_runtime)
+unlink(c(path, native_backing))
 
 message("OpenSpliceAI program and dense execution tests completed")

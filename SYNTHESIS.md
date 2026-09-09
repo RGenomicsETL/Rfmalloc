@@ -182,13 +182,71 @@ blocks, inference batch normalization, leaky ReLU, accumulated skip
 projections, the context crop and per-position softmax. Its complete
 16-position output agrees with the pinned upstream PyTorch model within 5e-7.
 The reference vocabulary gained reusable one-dimensional convolution and
-normalization operators, not an OpenSpliceAI executor. The native transformer
-lowerer rejects the floating-point sequence input explicitly. This is a
-semantic proof, not a speedup. On the i5-13500 with one thread and the same
-4-by-5080 production-shaped input, upstream PyTorch took a 14.81 ms median over
-10 warm runs; the dense R oracle took 252 ms over seven, 17.0 times slower.
-That gives the native lowering a concrete threshold: no CPU performance claim
-exists until the unchanged program beats the upstream path on this workload.
+normalization operators, not an OpenSpliceAI executor. An internal constrained
+native F32 dataflow lowering consumes that same bound program and its named
+`[channel, sequence, batch]` input, with no C model-family branch. Its retained
+fixed-shape context owns one CPU backend, no-allocation graph context, backend
+buffer, input and output staging, while its external-pointer owner retains CPU
+mapped spans. CUDA continues to borrow the model-owned weight backend and uses
+the official F32 im2col/mul_mat graph because a GGML custom CPU callback is not
+a CUDA operation. Fixed batch-normalization affine values upload once; a timed
+pass copies only input and output.
+
+The retained CPU convolution plan copies a validated F32 `[K, IC, OC]` span at
+context construction, repacks it as contiguous `[K * IC, OC]` output-channel
+blocks, and optionally copies bias. Its custom CPU graph output is `[OC, Nout,
+B]`, followed by a GGML permutation and contiguous materialization that keeps
+the AST value `[Nout, OC, B]`. The scalar callback is the oracle. It partitions
+`(batch, output-position)` rows across GGML workers, initializes its output
+channel row from bias, and reuses each valid input scalar across that packed
+output-channel block. On x86, an AVX2/FMA object is staged outside R's recorded
+flags and selected only after Rggml's complete upstream AVX2 predicate. ARM,
+wasm, and unsupported x86 CPUs use the scalar callback.
+
+The real MANE 80 nt rs10 oracle remains within 5e-7 of both dense R and the
+pinned upstream output. Focused direct, forced-scalar, and official F32
+im2col/mul_mat tests cover K 1, 3, and 11, channel tails, dilation, padding,
+stride, batches, and rejected dimensions. The focused cases' largest direct
+versus scalar difference was 7.16e-7 and direct versus im2col difference was
+1.19e-6, both expected from F32 accumulation order.
+
+On the i5-13500, the exact current 80 nt checkpoint at input `[4, 181, batch]`
+was warmed, then timed in five blocks. A biallelic ref-plus-alt variant
+consumes two model samples, so every `variants/s` value below is mechanically
+`samples/s / 2`, never twice `samples/s`. The final direct plan is materially
+faster than the prior persistent official-im2col CPU path at batch 128.
+
+| Threads | Batch | Repeats/block | Samples/s | Ref-plus-alt variants/s | Direct versus prior persistent |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1 | 2,000 | 583.3 | 291.6 | 4.59x |
+| 1 | 8 | 500 | 586.9 | 293.4 | 4.62x |
+| 1 | 32 | 100 | 598.7 | 299.3 | 4.71x |
+| 1 | 128 | 30 | 586.3 | 293.2 | 4.62x |
+| 1 | 512 | 8 | 592.8 | 296.4 | 4.67x |
+| 14 | 1 | 3,000 | 606.8 | 303.4 | 1.16x |
+| 14 | 8 | 500 | 1,470.0 | 735.0 | 2.30x |
+| 14 | 32 | 100 | 1,841.2 | 920.6 | 2.57x |
+| 14 | 128 | 50 | 2,018.3 | 1,009.1 | 2.68x |
+| 14 | 512 | 15 | 2,067.3 | 1,033.6 | 3.06x |
+
+The prior persistent baseline samples/s were 127 at one thread for every batch
+and, at 14 threads, 524.7, 639.3, 716.6, 753.5, and 674.7. Dividing by two
+gives 63.5 variants/s at every one-thread batch and 262.4, 319.7, 358.3,
+376.7, and 337.4 variants/s at 14 threads. This corrects the denominator in
+the earlier reports. Warm upstream PyTorch at batch 128 is 8,356 samples/s or
+4,178 variants/s. The direct result there is 24.2% of upstream throughput, or
+4.14x slower, so this remains an internal execution proof rather than an R F32
+API.
+
+After the direct change, `perf record` at 14 threads and batch 128 attributes
+62.8% of sampled cycles to the staged AVX2/FMA accumulator and 26.8% to GGML
+barriers. The new pressure is synchronization and remaining graph operations,
+not im2col or unblocked F32 dots. No further fusion is retained here.
+Cached uncompressed FASTA+FAI 181-base slices already sustain about 318,000
+random and 468,000 coordinate-sorted fetches/s. Annotation lookup, not FASTA
+format, needs the next source-side change: three whole-array scans reach about
+529 queries/s on 19,305 GRCh38 rows, versus about 708,000/s for a
+contig-partitioned sorted-start/prefix-max-end point index in Python.
 
 A constrained vocabulary plus a deterministic validator makes both human and
 LLM-authored programs reviewable; the prompt is not the artifact. This is the

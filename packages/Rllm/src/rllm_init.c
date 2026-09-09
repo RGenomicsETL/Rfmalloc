@@ -18,6 +18,9 @@ SEXP RC_rllm_program_forward(SEXP bound, SEXP tokens_sexp,
                              SEXP recurrent_cache, SEXP n_ctx_sexp,
                              SEXP n_past_sexp,
                              SEXP backend_sexp, SEXP backend_context);
+SEXP RC_rllm_f32_program_forward(SEXP execution, SEXP inputs,
+                                 SEXP threads_sexp, SEXP backend_sexp,
+                                 SEXP backend_context, SEXP context);
 
 static const R_CallMethodDef CallEntries[] = {
     {"RC_rllm_register_backend", (DL_FUNC) &RC_rllm_register_backend, 0},
@@ -26,6 +29,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"RC_rllm_dequantize",       (DL_FUNC) &RC_rllm_dequantize,       3},
     {"RC_rllm_cuda_model_context", (DL_FUNC) &RC_rllm_cuda_model_context, 1},
     {"RC_rllm_program_forward",  (DL_FUNC) &RC_rllm_program_forward, 10},
+    {"RC_rllm_f32_program_forward", (DL_FUNC) &RC_rllm_f32_program_forward, 6},
     {NULL, NULL, 0}
 };
 

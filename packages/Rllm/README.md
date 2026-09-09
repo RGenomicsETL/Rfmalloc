@@ -181,7 +181,18 @@ all 56 F32 tensors to Rgguf’s writer:
 `Rscript tools/convert_openspliceai.R openspliceai.gguf model_80nt_rs10.pt 80`.
 The complete 16-position output of the MANE 80 nt rs10 checkpoint agrees
 with upstream PyTorch within 5e-7. The generic GGML transformer lowerer
-rejects its floating-point sequence-input grammar explicitly.
+rejects its floating-point sequence-input grammar explicitly. Its
+internal fixed-shape F32 CPU lowering retains mapped weights and its
+graph buffer. Each generic conv1d copies and packs its validated F32
+`[K, IC, OC]` weights and optional bias once, then uses a runtime-safe
+scalar or x86 AVX2/FMA direct kernel; CUDA retains the official im2col
+graph. On the i5-13500, the exact 80 nt checkpoint at `[4, 181, 128]`
+reached 2,018.3 samples/s, or 1,009.1 ref-plus-alt variants/s because
+each variant consumes two samples. This is 2.68 times the prior
+persistent CPU path but only 24.2% of upstream PyTorch’s 4,178
+variants/s, so it remains an internal execution surface. FASTA slicing,
+annotation overlap, allele construction, and DS/DP reduction remain
+outside the model boundary.
 
 Evo 2 remains an executable-frontier probe, but its program is not a
 caricature. The Evo 2 7B program records the complete 32-layer schedule:

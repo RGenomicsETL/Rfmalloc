@@ -13,6 +13,7 @@
  * GGML themselves.
  */
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -109,6 +110,13 @@ size_t Rggml_tensor_nb(const struct ggml_tensor *tensor, int dim)
 ggml_backend_t Rggml_backend_cpu_init(void)
 {
     return ggml_backend_cpu_init();
+}
+
+void Rggml_backend_cpu_set_n_threads(ggml_backend_t backend, int n_threads)
+{
+    if (backend && n_threads > 0) {
+        ggml_backend_cpu_set_n_threads(backend, n_threads);
+    }
 }
 
 void Rggml_backend_free(ggml_backend_t backend)
@@ -556,6 +564,61 @@ struct ggml_tensor *Rggml_ssm_conv(struct ggml_context *ctx,
 {
     if (!ctx || !sx || !kernel) return NULL;
     return ggml_ssm_conv(ctx, sx, kernel);
+}
+
+struct ggml_tensor *Rggml_conv_1d(struct ggml_context *ctx,
+                                   struct ggml_tensor *kernel,
+                                   struct ggml_tensor *data,
+                                   int stride, int padding, int dilation)
+{
+    if (!ctx || !kernel || !data || stride < 1 || padding < 0 || dilation < 1) {
+        return NULL;
+    }
+    if (kernel->type != GGML_TYPE_F32 || data->type != GGML_TYPE_F32 ||
+        kernel->ne[0] < 1 || kernel->ne[1] != data->ne[1] ||
+        data->ne[3] != 1) {
+        return NULL;
+    }
+    /* Upstream ggml_conv_1d deliberately builds an F16 im2col tensor. The
+     * bound F32-program contract instead needs F32 inference semantics, so
+     * compose the same upstream im2col and matmul primitives with an F32
+     * staging tensor. The layout is kernel [K, IC, OC], data [N, IC, B], and
+     * result [N, OC, B]. */
+    struct ggml_tensor *im2col = ggml_im2col(
+        ctx, kernel, data, stride, 0, padding, 0, dilation, 0,
+        false, GGML_TYPE_F32);
+    if (!im2col) return NULL;
+    /* A mapped CPU weight has data but deliberately no backend buffer. A
+     * reshape would be a view whose source lacks that buffer, which the
+     * retained all-tensor allocator correctly rejects. Make a metadata-only
+     * two-dimensional alias in that case. Device weights do have a buffer, so
+     * retain the ordinary GGML view path. */
+    if (kernel->ne[0] > INT64_MAX / kernel->ne[1]) return NULL;
+    struct ggml_tensor *flat_kernel;
+    if (kernel->buffer == NULL) {
+        int64_t flat_ne[2] = { kernel->ne[0] * kernel->ne[1], kernel->ne[2] };
+        flat_kernel = ggml_new_tensor(ctx, kernel->type, 2, flat_ne);
+        if (flat_kernel) flat_kernel->data = kernel->data;
+    } else {
+        flat_kernel = ggml_reshape_2d(ctx, kernel,
+                                      kernel->ne[0] * kernel->ne[1], kernel->ne[2]);
+    }
+    if (!flat_kernel || im2col->ne[1] > INT64_MAX / im2col->ne[2]) return NULL;
+    struct ggml_tensor *result = ggml_mul_mat(
+        ctx, flat_kernel,
+        ggml_reshape_2d(ctx, im2col, im2col->ne[0],
+                        im2col->ne[2] * im2col->ne[1]));
+    if (!result) return NULL;
+    result = ggml_reshape_3d(ctx, result, kernel->ne[2], im2col->ne[1],
+                             im2col->ne[2]);
+    return ggml_cont(ctx, ggml_permute(ctx, result, 1, 0, 2, 3));
+}
+
+struct ggml_tensor *Rggml_leaky_relu(struct ggml_context *ctx,
+                                      struct ggml_tensor *a, double slope)
+{
+    if (!ctx || !a || !isfinite(slope) || slope < 0) return NULL;
+    return ggml_leaky_relu(ctx, a, (float)slope, false);
 }
 
 struct ggml_tensor *Rggml_soft_max(struct ggml_context *ctx, struct ggml_tensor *a)

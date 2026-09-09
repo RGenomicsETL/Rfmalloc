@@ -14,6 +14,7 @@
 
 #if defined(RGGML_SIMD_DISPATCH) && RGGML_SIMD_DISPATCH
 void rggml_simd_dispatch_init(void);
+void rggml_conv1d_simd_dispatch_init(void);
 #endif
 
 SEXP RC_rggml_version(void);
@@ -27,6 +28,10 @@ SEXP RC_rggml_test_mul_mat_quant_backend(SEXP A_sexp, SEXP B_sexp,
     SEXP type_sexp, SEXP backend_sexp);
 SEXP RC_rggml_test_q4k_dot(SEXP nblocks_sexp);
 SEXP RC_rggml_bench_q4k_dot(SEXP nblocks_sexp, SEXP iters_sexp);
+SEXP RC_rggml_test_conv1d_f32(SEXP kernel_sexp, SEXP input_sexp,
+                              SEXP bias_sexp, SEXP stride_sexp,
+                              SEXP padding_sexp, SEXP dilation_sexp);
+SEXP RC_rggml_test_conv1d_f32_bounds(void);
 
 static const R_CallMethodDef CallEntries[] = {
     {"RC_rggml_version",           (DL_FUNC) &RC_rggml_version,           0},
@@ -39,6 +44,8 @@ static const R_CallMethodDef CallEntries[] = {
     {"RC_rggml_test_mul_mat_quant_backend", (DL_FUNC) &RC_rggml_test_mul_mat_quant_backend, 4},
     {"RC_rggml_test_q4k_dot",      (DL_FUNC) &RC_rggml_test_q4k_dot,      1},
     {"RC_rggml_bench_q4k_dot",     (DL_FUNC) &RC_rggml_bench_q4k_dot,     2},
+    {"RC_rggml_test_conv1d_f32",   (DL_FUNC) &RC_rggml_test_conv1d_f32,   6},
+    {"RC_rggml_test_conv1d_f32_bounds", (DL_FUNC) &RC_rggml_test_conv1d_f32_bounds, 0},
     {NULL, NULL, 0}
 };
 
@@ -59,6 +66,7 @@ static void register_c_callables(DllInfo *dll)
     R_RegisterCCallable("Rggml", "Rggml_tensor_nb",              (DL_FUNC) Rggml_tensor_nb);
 
     R_RegisterCCallable("Rggml", "Rggml_backend_cpu_init",       (DL_FUNC) Rggml_backend_cpu_init);
+    R_RegisterCCallable("Rggml", "Rggml_backend_cpu_set_n_threads", (DL_FUNC) Rggml_backend_cpu_set_n_threads);
     R_RegisterCCallable("Rggml", "Rggml_backend_free",           (DL_FUNC) Rggml_backend_free);
     R_RegisterCCallable("Rggml", "Rggml_backend_graph_compute",  (DL_FUNC) Rggml_backend_graph_compute);
     R_RegisterCCallable("Rggml", "Rggml_backend_blas_init",      (DL_FUNC) Rggml_backend_blas_init);
@@ -121,6 +129,11 @@ static void register_c_callables(DllInfo *dll)
     R_RegisterCCallable("Rggml", "Rggml_argsort_top_k",         (DL_FUNC) Rggml_argsort_top_k);
     R_RegisterCCallable("Rggml", "Rggml_concat",                (DL_FUNC) Rggml_concat);
     R_RegisterCCallable("Rggml", "Rggml_ssm_conv",              (DL_FUNC) Rggml_ssm_conv);
+    R_RegisterCCallable("Rggml", "Rggml_conv_1d",               (DL_FUNC) Rggml_conv_1d);
+    R_RegisterCCallable("Rggml", "Rggml_conv_1d_f32_plan_create", (DL_FUNC) Rggml_conv_1d_f32_plan_create);
+    R_RegisterCCallable("Rggml", "Rggml_conv_1d_f32_plan_destroy", (DL_FUNC) Rggml_conv_1d_f32_plan_destroy);
+    R_RegisterCCallable("Rggml", "Rggml_conv_1d_f32_plan_apply", (DL_FUNC) Rggml_conv_1d_f32_plan_apply);
+    R_RegisterCCallable("Rggml", "Rggml_leaky_relu",            (DL_FUNC) Rggml_leaky_relu);
     R_RegisterCCallable("Rggml", "Rggml_soft_max",              (DL_FUNC) Rggml_soft_max);
     R_RegisterCCallable("Rggml", "Rggml_soft_max_ext",          (DL_FUNC) Rggml_soft_max_ext);
     R_RegisterCCallable("Rggml", "Rggml_diag_mask_inf",         (DL_FUNC) Rggml_diag_mask_inf);
@@ -153,6 +166,7 @@ void R_init_Rggml(DllInfo *dll)
 {
 #if defined(RGGML_SIMD_DISPATCH) && RGGML_SIMD_DISPATCH
     rggml_simd_dispatch_init();
+    rggml_conv1d_simd_dispatch_init();
 #endif
     R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
     register_c_callables(dll);

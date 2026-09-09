@@ -71,9 +71,13 @@ typedef void (*Rggml_tensor_set_data_fun)(struct ggml_tensor *tensor, void *data
 typedef int64_t (*Rggml_tensor_ne_fun)(const struct ggml_tensor *tensor, int dim);
 typedef size_t (*Rggml_tensor_nb_fun)(const struct ggml_tensor *tensor, int dim);
 
+typedef struct Rggml_conv_1d_f32_plan Rggml_conv_1d_f32_plan;
+
 /* -- CPU backend ----------------------------------------------------------- */
 
 typedef ggml_backend_t (*Rggml_backend_cpu_init_fun)(void);
+typedef void (*Rggml_backend_cpu_set_n_threads_fun)(ggml_backend_t backend,
+                                                      int n_threads);
 typedef void (*Rggml_backend_free_fun)(ggml_backend_t backend);
 typedef int (*Rggml_backend_graph_compute_fun)(ggml_backend_t backend, struct ggml_cgraph *cgraph);
 
@@ -232,6 +236,29 @@ typedef struct ggml_tensor *(*Rggml_concat_fun)(struct ggml_context *ctx,
 typedef struct ggml_tensor *(*Rggml_ssm_conv_fun)(struct ggml_context *ctx,
                                                    struct ggml_tensor *sx,
                                                    struct ggml_tensor *kernel);
+typedef struct ggml_tensor *(*Rggml_conv_1d_fun)(struct ggml_context *ctx,
+                                                  struct ggml_tensor *kernel,
+                                                  struct ggml_tensor *data,
+                                                  int stride, int padding,
+                                                  int dilation);
+/* Persistent CPU-only direct F32 conv1d plan. Creation validates and copies
+ * GGUF-layout [K, IC, OC] weights plus optional OC bias into owned packed
+ * storage. The caller owns the returned plan and must destroy it only after
+ * every graph built from it and its backend buffer are released. The plan is
+ * immutable and contains no R object, so GGML worker callbacks need no R API.
+ * `max_output_channels` is an explicit per-plan bound. */
+typedef Rggml_conv_1d_f32_plan *(*Rggml_conv_1d_f32_plan_create_fun)(
+    const float *kernel, size_t kernel_bytes, const float *bias,
+    size_t bias_bytes, int64_t kernel_size, int64_t input_channels,
+    int64_t output_channels, int64_t stride, int64_t padding,
+    int64_t dilation, int64_t max_output_channels);
+typedef void (*Rggml_conv_1d_f32_plan_destroy_fun)(Rggml_conv_1d_f32_plan *plan);
+typedef struct ggml_tensor *(*Rggml_conv_1d_f32_plan_apply_fun)(
+    struct ggml_context *ctx, const Rggml_conv_1d_f32_plan *plan,
+    struct ggml_tensor *input);
+typedef struct ggml_tensor *(*Rggml_leaky_relu_fun)(struct ggml_context *ctx,
+                                                     struct ggml_tensor *a,
+                                                     double slope);
 typedef struct ggml_tensor *(*Rggml_soft_max_fun)(struct ggml_context *ctx,
                                                    struct ggml_tensor *a);
 typedef struct ggml_tensor *(*Rggml_soft_max_ext_fun)(struct ggml_context *ctx,
@@ -402,6 +429,12 @@ static inline Rggml_backend_cpu_init_fun Rggml_backend_cpu_init_ptr(void)
     return (Rggml_backend_cpu_init_fun) R_GetCCallable("Rggml", "Rggml_backend_cpu_init");
 }
 
+static inline Rggml_backend_cpu_set_n_threads_fun Rggml_backend_cpu_set_n_threads_ptr(void)
+{
+    return (Rggml_backend_cpu_set_n_threads_fun)
+        R_GetCCallable("Rggml", "Rggml_backend_cpu_set_n_threads");
+}
+
 static inline Rggml_backend_free_fun Rggml_backend_free_ptr(void)
 {
     return (Rggml_backend_free_fun) R_GetCCallable("Rggml", "Rggml_backend_free");
@@ -536,6 +569,35 @@ static inline Rggml_concat_fun Rggml_concat_ptr(void)
 static inline Rggml_ssm_conv_fun Rggml_ssm_conv_ptr(void)
 {
     return (Rggml_ssm_conv_fun) R_GetCCallable("Rggml", "Rggml_ssm_conv");
+}
+
+static inline Rggml_conv_1d_fun Rggml_conv_1d_ptr(void)
+{
+    return (Rggml_conv_1d_fun) R_GetCCallable("Rggml", "Rggml_conv_1d");
+}
+
+static inline Rggml_conv_1d_f32_plan_create_fun Rggml_conv_1d_f32_plan_create_ptr(void)
+{
+    return (Rggml_conv_1d_f32_plan_create_fun)
+        R_GetCCallable("Rggml", "Rggml_conv_1d_f32_plan_create");
+}
+
+static inline Rggml_conv_1d_f32_plan_destroy_fun Rggml_conv_1d_f32_plan_destroy_ptr(void)
+{
+    return (Rggml_conv_1d_f32_plan_destroy_fun)
+        R_GetCCallable("Rggml", "Rggml_conv_1d_f32_plan_destroy");
+}
+
+static inline Rggml_conv_1d_f32_plan_apply_fun Rggml_conv_1d_f32_plan_apply_ptr(void)
+{
+    return (Rggml_conv_1d_f32_plan_apply_fun)
+        R_GetCCallable("Rggml", "Rggml_conv_1d_f32_plan_apply");
+}
+
+static inline Rggml_leaky_relu_fun Rggml_leaky_relu_ptr(void)
+{
+    return (Rggml_leaky_relu_fun)
+        R_GetCCallable("Rggml", "Rggml_leaky_relu");
 }
 
 static inline Rggml_soft_max_fun Rggml_soft_max_ptr(void)

@@ -34,6 +34,7 @@ int64_t Rggml_tensor_ne(const struct ggml_tensor *tensor, int dim);
 size_t Rggml_tensor_nb(const struct ggml_tensor *tensor, int dim);
 
 ggml_backend_t Rggml_backend_cpu_init(void);
+void Rggml_backend_cpu_set_n_threads(ggml_backend_t backend, int n_threads);
 void Rggml_backend_free(ggml_backend_t backend);
 int Rggml_backend_graph_compute(ggml_backend_t backend, struct ggml_cgraph *cgraph);
 
@@ -161,6 +162,22 @@ struct ggml_tensor *Rggml_concat(struct ggml_context *ctx,
 struct ggml_tensor *Rggml_ssm_conv(struct ggml_context *ctx,
                                     struct ggml_tensor *sx,
                                     struct ggml_tensor *kernel);
+struct ggml_tensor *Rggml_conv_1d(struct ggml_context *ctx,
+                                   struct ggml_tensor *kernel,
+                                   struct ggml_tensor *data,
+                                   int stride, int padding, int dilation);
+struct Rggml_conv_1d_f32_plan;
+struct Rggml_conv_1d_f32_plan *Rggml_conv_1d_f32_plan_create(
+    const float *kernel, size_t kernel_bytes, const float *bias,
+    size_t bias_bytes, int64_t kernel_size, int64_t input_channels,
+    int64_t output_channels, int64_t stride, int64_t padding,
+    int64_t dilation, int64_t max_output_channels);
+void Rggml_conv_1d_f32_plan_destroy(struct Rggml_conv_1d_f32_plan *plan);
+struct ggml_tensor *Rggml_conv_1d_f32_plan_apply(
+    struct ggml_context *ctx, const struct Rggml_conv_1d_f32_plan *plan,
+    struct ggml_tensor *input);
+struct ggml_tensor *Rggml_leaky_relu(struct ggml_context *ctx,
+                                      struct ggml_tensor *a, double slope);
 struct ggml_tensor *Rggml_soft_max(struct ggml_context *ctx, struct ggml_tensor *a);
 struct ggml_tensor *Rggml_soft_max_ext(struct ggml_context *ctx,
                                        struct ggml_tensor *a,
