@@ -118,6 +118,13 @@ PKG_CPPFLAGS = -I../inst/fmalloc -DHAVE_CONFIG_H
 # Linker flags - include pthread and the fmalloc library
 PKG_LIBS = -L../inst/fmalloc ../inst/fmalloc/libfmalloc.a -lpthread
 
+# fmalloc.cpp textually includes every .inc, so a change to one of them has to
+# invalidate the object; its own timestamp never moves. The all: target keeps
+# the shared library the default goal, as Writing R Extensions requires of any
+# Makevars that adds a rule of its own.
+all: $(SHLIB)
+
+fmalloc.o: $(wildcard *.inc) fmalloc_internal.h fmalloc_ops.h
 EOF
 
 # Create Makevars.win for Windows
@@ -129,6 +136,14 @@ PKG_CPPFLAGS = -I../inst/fmalloc -DHAVE_CONFIG_H
 
 # Linker flags - Rtools includes pthread support
 PKG_LIBS = -L../inst/fmalloc ../inst/fmalloc/libfmalloc.a -lpthread
+
+# fmalloc.cpp textually includes every .inc, so a change to one of them has to
+# invalidate the object; its own timestamp never moves. The all: target keeps
+# the shared library the default goal, as Writing R Extensions requires of any
+# Makevars that adds a rule of its own.
+all: $(SHLIB)
+
+fmalloc.o: $(wildcard *.inc) fmalloc_internal.h fmalloc_ops.h
 EOF
 
 echo "Configure completed successfully!"

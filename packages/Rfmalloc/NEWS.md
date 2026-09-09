@@ -1,5 +1,13 @@
 # NEWS
 
+- Fixed an incremental build that could link a stale object and still report
+  success. Every implementation unit is an `.inc` textually included by
+  `fmalloc.cpp`, whose own timestamp never moves, so `configure`'s generated
+  `src/Makevars` now declares them as dependencies (behind an explicit
+  `all: $(SHLIB)`, so the shared library stays the default goal). A rig install
+  had reported DONE while its `Rfmalloc.so` was missing symbols added minutes
+  earlier.
+
 - Added `Rfmalloc_ld_alloc()` and `Rfmalloc_ld_write()` to the C-callable API:
   an `ld` store whose band geometry is fixed up front and whose correlations
   are then written one column at a time. A producer whose band does not fit in

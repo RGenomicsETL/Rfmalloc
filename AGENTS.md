@@ -46,6 +46,18 @@ as one commit and is validated as one unit.
   fallback must always produce correct results. Never make correctness depend
   on which backend is selected.
 
+## Build gotcha
+
+R's default rules do not track header dependencies, and `R CMD INSTALL` without
+`--preclean` will happily link objects older than the headers they were
+compiled against, then report success. `make install` at the repo root uses
+`--preclean` for exactly this reason; a per-package `R CMD INSTALL` after a
+header-only change does not, and a cross-package header (`inst/include/*.h`) is
+invisible to every consumer's make. Rfmalloc declares its `.inc` dependencies
+explicitly because all of its implementation lives there. Any Makevars that
+adds a rule of its own must start with `all: $(SHLIB)`, or that rule becomes
+make's default goal and the shared library is never linked.
+
 ## Test workflow
 - Per package: `Rscript -e "tinytest::test_package('<pkg>')"` (install the
   package and its local siblings first: `R CMD INSTALL packages/<sibling>`

@@ -547,6 +547,10 @@ PKG_CPPFLAGS = -I../inst/include -I../inst/ggml @RGGML_VULKAN_DEF@ @RGGML_CUDA_D
 PKG_LIBS = -L../inst/ggml -lggml @VULKAN_LIBS@ @CUDA_LIBS@ @BLAS_LINK_LIBS@ @PLATFORM_LIBS@
 
 CXX_STD = CXX17
+
+# R's default rules do not track header dependencies, so an incremental install
+# after a header-only change links stale objects and still reports success.
+$(OBJECTS): $(wildcard *.h)
 EOF
 
 # Substituted here rather than expanded in the heredoc above, which is quoted so
