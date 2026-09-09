@@ -644,6 +644,13 @@ SEXP RC_rggml_vulkan_info(void)
     return out;
 }
 
+/* RC_rggml_cuda_touched() -> TRUE once this process has asked CUDA anything. */
+SEXP
+RC_rggml_cuda_touched(void)
+{
+    return Rf_ScalarLogical(Rggml_cuda_touched_ptr()());
+}
+
 /* RC_rggml_cuda_info() -> list(n_devices, description of device 0 or NA) */
 SEXP RC_rggml_cuda_info(void)
 {

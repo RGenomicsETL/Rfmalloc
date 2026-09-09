@@ -1,5 +1,12 @@
 # Rggml 0.1.0 (unreleased)
 
+- Added `rggml_cuda_tf32()` and the `Rggml_cuda_touched()` C-callable behind
+  it. cuBLAS computes F32 products on TF32 tensor cores by default on Ampere
+  and later, which costs three decimal digits of agreement with the CPU
+  backend; the setting that turns it off is read by the CUDA libraries when
+  they initialize, so the function warns rather than pretending to work once
+  something in the session has already touched CUDA.
+
 - Documented that cuBLAS computes F32 products on TF32 tensor cores by default
   on Ampere and later, and what that costs in agreement with the CPU backend.
 

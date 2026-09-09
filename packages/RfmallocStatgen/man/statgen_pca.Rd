@@ -18,7 +18,7 @@ statgen_pca(
 }
 \arguments{
 \item{X}{A numeric matrix (samples x variants), or anything
-\code{\link[base:matrix]{base::as.matrix()}} turns into one; or a two-dimensional \code{bed}/\code{dosage}
+\code{\link[base:as.matrix]{base::as.matrix()}} turns into one; or a two-dimensional \code{bed}/\code{dosage}
 \link[Rfmalloc:fmalloc_tensor]{Rfmalloc::fmalloc_tensor} (samples x variants), which is decomposed
 \emph{out of core}: the tensor is streamed one variant-column block at a time
 and the dense matrix is never materialized. To get a standardized PCA of a

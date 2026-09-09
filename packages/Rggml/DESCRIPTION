@@ -28,7 +28,7 @@ Depends:
 Suggests:
     tinytest
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.3
 URL: https://github.com/sounkou-bioinfo/Rfmalloc,
     https://sounkou-bioinfo.github.io/Rfmalloc/Rggml/
 BugReports: https://github.com/sounkou-bioinfo/Rfmalloc/issues
+Config/roxygen2/version: 8.0.0

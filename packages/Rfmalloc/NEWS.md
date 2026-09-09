@@ -1,5 +1,12 @@
 # NEWS
 
+- Added `Rfmalloc_ld_alloc()` and `Rfmalloc_ld_write()` to the C-callable API:
+  an `ld` store whose band geometry is fixed up front and whose correlations
+  are then written one column at a time. A producer whose band does not fit in
+  memory no longer has to assemble it in doubles before handing it over; the
+  store itself is fmalloc storage. `Rfmalloc_ld_build()` is unchanged and is
+  now the all-at-once form of the same thing.
+
 ## 0.1.0 (unreleased)
 
 - Added a zero-copy C view over phased-haplotype stores. HMM consumers receive

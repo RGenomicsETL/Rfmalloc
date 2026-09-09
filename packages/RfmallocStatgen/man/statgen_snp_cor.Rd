@@ -40,9 +40,11 @@ Computes the (Pearson) correlations between nearby variants of a \code{bed} or
 variant column at a time through \link[Rfmalloc:fmalloc_tensor]{Rfmalloc::fmalloc_tensor}'s decode (never
 materializing the dense samples x variants matrix), each column is
 mean-imputed, centred and normalized to unit L2 norm, and the correlation of
-two nearby variants is then the dot product of their unit columns. Only a
-sliding window of unit columns (bounded by the window width, not the variant
-count) is held resident.
+two nearby variants is then the dot product of their unit columns. Each band
+column is written into the store as soon as no later variant can add to it,
+so what stays resident is a sliding window of unit columns and of in-flight
+band columns, both bounded by the window width rather than by the variant
+count; the band itself lives in the store's own fmalloc storage.
 }
 \details{
 Because the variants are assumed position-sorted, each variant's in-window

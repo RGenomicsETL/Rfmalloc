@@ -328,6 +328,11 @@ typedef int (*Rggml_backend_vulkan_device_description_fun)(int device, char *buf
 /* Always resolvable; reports 0 devices and refuses to init unless Rggml was
  * built with --with-cuda. Free with Rggml_backend_free(). */
 typedef int (*Rggml_backend_cuda_device_count_fun)(void);
+/* TRUE once this process has asked CUDA anything. The CUDA libraries read
+ * NVIDIA_TF32_OVERRIDE when they initialize, so a caller that wants full F32
+ * products has to set it before that point; this is how rggml_cuda_tf32()
+ * knows to say the setting can no longer take effect. */
+typedef int (*Rggml_cuda_touched_fun)(void);
 typedef ggml_backend_t (*Rggml_backend_cuda_init_fun)(int device);
 typedef int (*Rggml_backend_cuda_device_description_fun)(int device, char *buf,
                                                           size_t buf_size);
@@ -704,6 +709,11 @@ static inline Rggml_backend_vulkan_init_fun Rggml_backend_vulkan_init_ptr(void)
 static inline Rggml_backend_vulkan_device_description_fun Rggml_backend_vulkan_device_description_ptr(void)
 {
     return (Rggml_backend_vulkan_device_description_fun) R_GetCCallable("Rggml", "Rggml_backend_vulkan_device_description");
+}
+
+static inline Rggml_cuda_touched_fun Rggml_cuda_touched_ptr(void)
+{
+    return (Rggml_cuda_touched_fun) R_GetCCallable("Rggml", "Rggml_cuda_touched");
 }
 
 static inline Rggml_backend_cuda_device_count_fun Rggml_backend_cuda_device_count_ptr(void)

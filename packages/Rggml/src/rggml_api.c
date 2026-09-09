@@ -214,9 +214,21 @@ int Rggml_backend_vulkan_device_description(int device, char *buf, size_t buf_si
 
 /* CUDA is the same optional-backend contract as Vulkan: the C-callables are
  * always present, while a non-CUDA build reports no devices and declines init. */
+/* Set once anything in this process has asked CUDA a question. cuBLAS reads
+ * NVIDIA_TF32_OVERRIDE when its library initializes, so a caller that wants to
+ * change reduced-precision behaviour has to do it before that point, and
+ * rggml_cuda_tf32() uses this to say so instead of failing silently. */
+static int rggml_cuda_touched;
+
+int Rggml_cuda_touched(void)
+{
+    return rggml_cuda_touched;
+}
+
 int Rggml_backend_cuda_device_count(void)
 {
 #ifdef RGGML_HAVE_CUDA
+    rggml_cuda_touched = 1;
     return ggml_backend_cuda_get_device_count();
 #else
     return 0;
@@ -226,6 +238,7 @@ int Rggml_backend_cuda_device_count(void)
 ggml_backend_t Rggml_backend_cuda_init(int device)
 {
 #ifdef RGGML_HAVE_CUDA
+    rggml_cuda_touched = 1;
     if (device < 0 || device >= ggml_backend_cuda_get_device_count()) return NULL;
     return ggml_backend_cuda_init(device);
 #else

@@ -175,6 +175,12 @@ typedef int (*Rfmalloc_storage_advise_fun)(SEXP object, size_t offset,
  *   - Rfmalloc_ld_build: build an ld store from computed per-column bands (lo,
  *     len 0-based, rvals the column-major concatenation of band correlations);
  *     returns the ALTREP raw payload SEXP - PROTECT it immediately.
+ *   - Rfmalloc_ld_alloc / Rfmalloc_ld_write: the same store built one column at
+ *     a time. Alloc fixes the band geometry and zeroes every correlation;
+ *     write quantizes `count` values into column j starting `first` entries
+ *     into its band. A producer whose band does not fit in memory uses these
+ *     instead of Rfmalloc_ld_build, and only its in-flight columns are
+ *     resident: the store itself is fmalloc storage.
  */
 typedef R_xlen_t (*Rfmalloc_ld_ncol_fun)(SEXP store);
 typedef int (*Rfmalloc_ld_bits_fun)(SEXP store);
@@ -186,6 +192,11 @@ typedef int (*Rfmalloc_ld_col_raw_fun)(SEXP store, R_xlen_t j, R_xlen_t *lo,
 typedef SEXP (*Rfmalloc_ld_build_fun)(SEXP runtime, R_xlen_t n_variants, int bits,
                                       int window, const R_xlen_t *lo,
                                       const R_xlen_t *len, const double *rvals);
+typedef SEXP (*Rfmalloc_ld_alloc_fun)(SEXP runtime, R_xlen_t n_variants, int bits,
+                                      int window, const R_xlen_t *lo,
+                                      const R_xlen_t *len);
+typedef int (*Rfmalloc_ld_write_fun)(SEXP store, R_xlen_t j, R_xlen_t first,
+                                     R_xlen_t count, const double *values);
 
 static inline Rfmalloc_default_runtime_fun Rfmalloc_default_runtime_ptr(void)
 {
@@ -495,6 +506,21 @@ static inline int Rfmalloc_ld_col_raw(SEXP store, R_xlen_t j, R_xlen_t *lo,
                                       R_xlen_t *len, const void **values)
 {
     return ((Rfmalloc_ld_col_raw_fun) R_GetCCallable("Rfmalloc", "Rfmalloc_ld_col_raw"))(store, j, lo, len, values);
+}
+
+static inline SEXP Rfmalloc_ld_alloc(SEXP runtime, R_xlen_t n_variants, int bits,
+                                     int window, const R_xlen_t *lo,
+                                     const R_xlen_t *len)
+{
+    return ((Rfmalloc_ld_alloc_fun) R_GetCCallable("Rfmalloc", "Rfmalloc_ld_alloc"))(
+        runtime, n_variants, bits, window, lo, len);
+}
+
+static inline int Rfmalloc_ld_write(SEXP store, R_xlen_t j, R_xlen_t first,
+                                    R_xlen_t count, const double *values)
+{
+    return ((Rfmalloc_ld_write_fun) R_GetCCallable("Rfmalloc", "Rfmalloc_ld_write"))(
+        store, j, first, count, values);
 }
 
 static inline SEXP Rfmalloc_ld_build(SEXP runtime, R_xlen_t n_variants, int bits,

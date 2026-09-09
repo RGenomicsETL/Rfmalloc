@@ -3,6 +3,7 @@
 export(ggml_version)
 export(rggml_cpu_info)
 export(rggml_cuda_info)
+export(rggml_cuda_tf32)
 export(rggml_has_cuda)
 export(rggml_has_vulkan)
 export(rggml_mul_mat)

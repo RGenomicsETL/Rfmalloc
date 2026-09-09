@@ -158,13 +158,11 @@ extern "C" SEXP C_statgen_snp_cor(SEXP tensor, SEXP ns, SEXP ms, SEXP sizes,
   if (has_pos && (R_xlen_t)Rf_xlength(infos_pos) != m)
     Rf_error("infos_pos must have length equal to the number of variants");
 
-  // Per-column contiguous band [lo_j, hi_j] (0-based), the cumulative offset
-  // table, and the total number of stored entries.
+  // Per-column contiguous band [lo_j, hi_j], 0-based. The store owns the
+  // cumulative offsets; only the geometry is needed here.
   std::vector<R_xlen_t> lo((size_t)m), hi((size_t)m), len((size_t)m);
-  std::vector<R_xlen_t> cum((size_t)m + 1);
   {
     R_xlen_t a = 0, b = 0;  // two pointers for the position-based window
-    R_xlen_t acc = 0;
     for (R_xlen_t j = 0; j < m; j++) {
       R_xlen_t loj, hij;
       if (has_pos) {
@@ -181,19 +179,23 @@ extern "C" SEXP C_statgen_snp_cor(SEXP tensor, SEXP ns, SEXP ms, SEXP sizes,
       lo[(size_t)j] = loj;
       hi[(size_t)j] = hij;
       len[(size_t)j] = hij - loj + 1;
-      cum[(size_t)j] = acc;
-      acc += len[(size_t)j];
     }
-    cum[(size_t)m] = acc;
   }
-  const R_xlen_t nnz = cum[(size_t)m];
-
-  std::vector<double> rvals((size_t)nnz, 0.0);
-  std::vector<std::vector<double> > cols((size_t)m);  // sliding unit columns
+  // The band is written into the store one column at a time, so what stays
+  // resident is the columns still in flight, not the whole band: column j is
+  // complete once j' reaches hi[j], and hi is non-decreasing.
+  SEXP runtime = Rfmalloc_runtime_of_vector(tensor);
+  const int window = has_pos ? (int)W : (int)size_idx;
+  SEXP store = PROTECT(Rfmalloc_ld_alloc(runtime, m, bits, window, lo.data(),
+                                         len.data()));
+  std::vector<std::vector<double> > band((size_t)m);   // in-flight bands
+  std::vector<std::vector<double> > cols((size_t)m);   // sliding unit columns
   std::vector<double> buf((size_t)n);
   R_xlen_t cleared = 0;  // columns < cleared have been evicted
+  R_xlen_t written = 0;  // columns < written have been stored
 
   for (R_xlen_t j = 0; j < m; j++) {
+    band[(size_t)j].assign((size_t)len[(size_t)j], 0.0);
     // Evict columns that no future j (>= this one) can neighbour: lo is
     // non-decreasing, so anything below lo[j] is done.
     for (; cleared < lo[(size_t)j]; cleared++) {
@@ -228,7 +230,7 @@ extern "C" SEXP C_statgen_snp_cor(SEXP tensor, SEXP ns, SEXP ms, SEXP sizes,
     cols[(size_t)j].swap(u);
 
     // diagonal r = 1
-    rvals[(size_t)(cum[(size_t)j] + (j - lo[(size_t)j]))] = 1.0;
+    band[(size_t)j][(size_t)(j - lo[(size_t)j])] = 1.0;
 
     // correlations with the already-decoded in-window neighbours below j; store
     // both (j,k) and (k,j) since the full symmetric band is kept.
@@ -240,19 +242,36 @@ extern "C" SEXP C_statgen_snp_cor(SEXP tensor, SEXP ns, SEXP ms, SEXP sizes,
       double r = 0.0;
       for (R_xlen_t i = 0; i < n; i++) r += uj[(size_t)i] * uk[(size_t)i];
       if (thr_r2 > 0.0 && r * r < thr_r2) r = 0.0;
-      rvals[(size_t)(cum[(size_t)k] + (j - lo[(size_t)k]))] = r;  // (row j, col k)
-      rvals[(size_t)(cum[(size_t)j] + (k - lo[(size_t)j]))] = r;  // (row k, col j)
+      band[(size_t)k][(size_t)(j - lo[(size_t)k])] = r;  // (row j, col k)
+      band[(size_t)j][(size_t)(k - lo[(size_t)j])] = r;  // (row k, col j)
+    }
+
+    // Flush every column no later step can still touch.
+    for (; written <= j && hi[(size_t)written] <= j; written++) {
+      const std::vector<double>& b = band[(size_t)written];
+      if (Rfmalloc_ld_write(store, written, 0, (R_xlen_t)b.size(), b.data()) != 0) {
+        UNPROTECT(1);
+        Rf_error("statgen_snp_cor: failed to store ld column %lld",
+                 (long long)written);
+      }
+      std::vector<double>().swap(band[(size_t)written]);
     }
 
     if ((j & 0x3FF) == 0) R_CheckUserInterrupt();
   }
 
-  SEXP runtime = Rfmalloc_runtime_of_vector(tensor);
-  const int window = has_pos ? (int)W : (int)size_idx;
-  SEXP payload = PROTECT(Rfmalloc_ld_build(runtime, m, bits, window,
-                                           lo.data(), len.data(), rvals.data()));
+  for (; written < m; written++) {
+    const std::vector<double>& b = band[(size_t)written];
+    if (Rfmalloc_ld_write(store, written, 0, (R_xlen_t)b.size(), b.data()) != 0) {
+      UNPROTECT(1);
+      Rf_error("statgen_snp_cor: failed to store ld column %lld",
+               (long long)written);
+    }
+    std::vector<double>().swap(band[(size_t)written]);
+  }
+
   UNPROTECT(1);
-  return payload;
+  return store;
 }
 
 // ---------------------------------------------------------------------------

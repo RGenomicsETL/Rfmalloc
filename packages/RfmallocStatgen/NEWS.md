@@ -1,5 +1,12 @@
 # RfmallocStatgen 0.1.0 (unreleased)
 
+- `statgen_snp_cor()` writes the banded LD into its store one column at a time
+  instead of assembling the whole band in double precision first. Only the
+  columns still in flight are resident, which is bounded by the window rather
+  than by the number of variants: building a 100,000-variant band at window
+  +/-500 moved peak memory by 711 MB before and by nothing now, at the same
+  speed and with identical output.
+
 - Named each sibling package explicitly in `Remotes`, so dependency installers
   distinguish monorepo subdirectories which share one repository commit.
 

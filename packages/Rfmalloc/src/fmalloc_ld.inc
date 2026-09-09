@@ -152,6 +152,90 @@ static inline double rfm_ld_value_at(const rfm_ld_view *v, R_xlen_t k)
 // nothing here enforces it (the R/C callers do). Returns an fmalloc ALTREP raw
 // payload (the caller PROTECTs it).
 //==============================================================================
+// Allocate a payload whose band geometry is final but whose correlations are
+// still zero, so a producer can fill it one column at a time and never hold the
+// whole band in memory. rfm_ld_build_payload() is the all-at-once form of the
+// same thing.
+static SEXP rfm_ld_alloc_payload(fm_runtime *runtime, R_xlen_t m, int bits,
+                                 uint32_t window, const R_xlen_t *lo,
+                                 const R_xlen_t *len)
+{
+    if (bits != 8 && bits != 16) {
+        Rf_error("ld bits must be 8 or 16");
+    }
+    R_xlen_t nnz = 0;
+    for (R_xlen_t j = 0; j < m; j++) {
+        if (len[j] < 0) {
+            Rf_error("ld column length must be non-negative");
+        }
+        nnz += len[j];
+    }
+    const size_t bpv = (size_t)bits / 8;
+    const size_t off_cum = RFM_LD_HDR_BYTES;
+    const size_t off_lo = off_cum + (size_t)(m + 1) * 8;
+    const size_t off_val = off_lo + (size_t)m * 8;
+    const size_t total = off_val + (size_t)nnz * bpv;
+
+    fm_vector *vec = allocate_fm_vector(runtime, RAWSXP, (R_xlen_t)total, true, false);
+    SEXP ans = PROTECT(fmalloc_new_altrep(vec));
+    uint8_t *p = static_cast<uint8_t *>(vector_data_or_dummy(vec));
+
+    rfm_ld_header hdr;
+    memcpy(hdr.magic, rfm_ld_magic7, sizeof(rfm_ld_magic7));
+    hdr.magic[7] = RFM_LD_RAW;
+    hdr.n_variants = (uint64_t)m;
+    hdr.nnz = (uint64_t)nnz;
+    hdr.bits = (uint32_t)bits;
+    hdr.window = window;
+    hdr.reserved = 0;
+    memcpy(p, &hdr, sizeof(hdr));
+
+    uint64_t *cum = reinterpret_cast<uint64_t *>(p + off_cum);
+    int64_t *lo_out = reinterpret_cast<int64_t *>(p + off_lo);
+    uint64_t acc = 0;
+    for (R_xlen_t j = 0; j < m; j++) {
+        cum[j] = acc;
+        lo_out[j] = (int64_t)lo[j];
+        acc += (uint64_t)len[j];
+    }
+    cum[m] = acc;
+    memset(p + off_val, 0, (size_t)nnz * bpv);
+
+    vec->maybe_dirty = true;
+    UNPROTECT(1);
+    return ans;
+}
+
+// Quantize `count` correlations into column j's band, starting `first` entries
+// into that band. Returns 0, or -1 when the store or the range is invalid.
+static int rfm_ld_write_column(SEXP store, R_xlen_t j, R_xlen_t first,
+                               R_xlen_t count, const double *values)
+{
+    rfm_ld_view view;
+    if (rfm_ld_open(store, &view) != 0) return -1;
+    if (j < 0 || j >= view.m) return -1;
+    if (first < 0 || count < 0 || !values) return -1;
+    const uint64_t begin = view.cum[j];
+    const R_xlen_t len = (R_xlen_t)(view.cum[j + 1] - begin);
+    if (first + count > len) return -1;
+    if (view.bits == 16) {
+        int16_t *q = static_cast<int16_t *>(const_cast<void *>(view.values));
+        for (R_xlen_t t = 0; t < count; t++) {
+            q[begin + first + t] = (int16_t)rfm_ld_quant(values[t], 16);
+        }
+    } else {
+        int8_t *q = static_cast<int8_t *>(const_cast<void *>(view.values));
+        for (R_xlen_t t = 0; t < count; t++) {
+            q[begin + first + t] = (int8_t)rfm_ld_quant(values[t], 8);
+        }
+    }
+    {
+        fm_vector *vec = maybe_vector_from_altrep(store);
+        if (vec) vec->maybe_dirty = true;
+    }
+    return 0;
+}
+
 static SEXP rfm_ld_build_payload(fm_runtime *runtime, R_xlen_t m, int bits,
                                  uint32_t window, const R_xlen_t *lo,
                                  const R_xlen_t *len, const double *rvals)
@@ -336,6 +420,31 @@ extern "C" SEXP Rfmalloc_ld_build(SEXP runtime, R_xlen_t n_variants, int bits,
     }
     uint32_t win = window < 0 ? 0u : (uint32_t)window;
     return rfm_ld_build_payload(rt, n_variants, bits, win, lo, len, rvals);
+}
+
+// Allocate an ld store whose band geometry is final and whose correlations are
+// all zero, for a producer that fills it one column at a time.
+extern "C" SEXP Rfmalloc_ld_alloc(SEXP runtime, R_xlen_t n_variants, int bits,
+                                  int window, const R_xlen_t *lo,
+                                  const R_xlen_t *len)
+{
+    fm_runtime *rt = runtime_from_xptr(runtime);
+    if (!rt || !rt->info) {
+        Rf_error("fmalloc runtime is closed");
+    }
+    if (n_variants < 0) {
+        Rf_error("n_variants must be non-negative");
+    }
+    uint32_t win = window < 0 ? 0u : (uint32_t)window;
+    return rfm_ld_alloc_payload(rt, n_variants, bits, win, lo, len);
+}
+
+// Quantize and store `count` correlations into column j's band, starting
+// `first` entries into it. Returns 0, or -1 for an invalid store or range.
+extern "C" int Rfmalloc_ld_write(SEXP store, R_xlen_t j, R_xlen_t first,
+                                 R_xlen_t count, const double *values)
+{
+    return rfm_ld_write_column(store, j, first, count, values);
 }
 
 //==============================================================================

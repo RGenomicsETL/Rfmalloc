@@ -35,5 +35,15 @@ Useful links:
 \author{
 \strong{Maintainer}: Sounkou Mahamane Toure \email{sounkoutoure@gmail.com}
 
+Authors:
+\itemize{
+  \item Sounkou Mahamane Toure \email{sounkoutoure@gmail.com}
+}
+
+Other contributors:
+\itemize{
+  \item Zilong Li (PCAone randomized-SVD core) [copyright holder]
+}
+
 }
 \keyword{internal}

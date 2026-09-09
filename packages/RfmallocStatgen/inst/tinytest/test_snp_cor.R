@@ -134,3 +134,45 @@ library(RfmallocStatgen)
 
     invisible(NULL)
 })()
+
+## The band is written into the store one column at a time, so a run whose
+## variant count is many times its window exercises the flush cycle repeatedly:
+## a column must be stored exactly once, after the last step that can touch it,
+## and never before. Compared against the same stats::cor() oracle.
+(function() {
+    set.seed(20260910)
+
+    n <- 60L
+    m <- 400L
+    size <- 7L
+    g <- matrix(sample(0:2, n * m, replace = TRUE, prob = c(0.25, 0.5, 0.25)),
+                nrow = n, ncol = m)
+    for (j in seq_len(m)) if (length(unique(g[, j])) == 1L) g[1L, j] <- (g[1L, j] + 1L) %% 3L
+    storage.mode(g) <- "integer"
+
+    tmp <- tempfile(fileext = ".bin")
+    rt <- open_fmalloc(tmp, mode = "scratch", size_gb = 0.2)
+    on.exit({ cleanup_fmalloc(rt); unlink(tmp) }, add = TRUE)
+
+    corr <- statgen_snp_cor(fmalloc_bed(g, runtime = rt), size = size)
+    expect_equal(ld_ncol(corr), m)
+
+    R_full <- stats::cor(g)
+    tol8 <- 1 / 127 + 1e-8
+    worst <- 0
+    for (j in seq_len(m)) {
+        band <- ld_col(corr, j)
+        rows <- seq.int(band$lo, band$hi)
+        expect_equal(length(band$x), length(rows))
+        worst <- max(worst, max(abs(band$x - R_full[rows, j])))
+    }
+    expect_true(worst <= tol8)
+    ## outside the window the store is exactly zero, not merely small
+    expect_equal(ld_pair(corr, 1L, m), 0)
+    expect_equal(ld_pair(corr, 1L, size + 2L), 0)
+    ## the diagonal survives every flush
+    expect_equal(vapply(seq_len(m), function(j) ld_pair(corr, j, j), numeric(1)),
+                 rep(1, m))
+    cat(sprintf("  streamed %d columns at window +/-%d: max |diff| = %.6f\n",
+                m, size, worst))
+})()

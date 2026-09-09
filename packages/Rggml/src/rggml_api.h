@@ -48,6 +48,7 @@ int Rggml_backend_vulkan_device_description(int device, char *buf, size_t buf_si
 
 /* CUDA backend; reports 0 devices unless built --with-cuda */
 int Rggml_backend_cuda_device_count(void);
+int Rggml_cuda_touched(void);
 ggml_backend_t Rggml_backend_cuda_init(int device);
 int Rggml_backend_cuda_device_description(int device, char *buf, size_t buf_size);
 

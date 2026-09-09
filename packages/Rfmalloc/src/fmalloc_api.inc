@@ -726,6 +726,8 @@ static void register_c_callables(void)
     R_RegisterCCallable("Rfmalloc", "Rfmalloc_ld_col", (DL_FUNC)Rfmalloc_ld_col);
     R_RegisterCCallable("Rfmalloc", "Rfmalloc_ld_col_raw", (DL_FUNC)Rfmalloc_ld_col_raw);
     R_RegisterCCallable("Rfmalloc", "Rfmalloc_ld_build", (DL_FUNC)Rfmalloc_ld_build);
+    R_RegisterCCallable("Rfmalloc", "Rfmalloc_ld_alloc", (DL_FUNC)Rfmalloc_ld_alloc);
+    R_RegisterCCallable("Rfmalloc", "Rfmalloc_ld_write", (DL_FUNC)Rfmalloc_ld_write);
 }
 
 static const R_CallMethodDef CallEntries[] = {
