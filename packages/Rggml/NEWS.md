@@ -1,5 +1,8 @@
 # Rggml 0.1.0 (unreleased)
 
+- Documented that cuBLAS computes F32 products on TF32 tensor cores by default
+  on Ampere and later, and what that costs in agreement with the CPU backend.
+
 - The packed F32 conv1d plan can absorb a per-input-channel affine, a leaky
   rectification, or both, through `Rggml_conv_1d_f32_plan_fuse_input()`. A
   unit-stride convolution gathers each input channel as one window, activates

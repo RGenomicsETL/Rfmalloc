@@ -135,6 +135,15 @@ standalone matrix product. Extended Blackwell targets such as `sm_120a` emit
 both matching PTX and SASS rather than silently losing the architecture
 suffix.
 
+cuBLAS decides for itself how to compute an F32 product. On Ampere and later
+it uses TF32 tensor cores for `cublasSgemm` by default, which keeps ten
+mantissa bits rather than twenty-four. On the RTX 5050 rig one OpenSpliceAI
+forward pass differed from the CPU result by 7.3e-4 with that default and by
+1.0e-6 with `NVIDIA_TF32_OVERRIDE=0`, for 19% less throughput at batch 256
+(16,678 against 13,989 samples/s). Set that variable before the first CUDA
+call when a device result has to agree with the CPU reference to F32
+accumulation error.
+
 CUDA graph capture is compiled only when `RGGML_CUDA_GRAPHS=1` is set during
 configuration. It is off by default because Rllm's current decode graph changes
 its attention extent on every token: on the RTX 5050 rig capture measured 62.6

@@ -123,10 +123,23 @@ expect_error(
     Rllm:::.rllm_f32_forward(native_model, list(other = sequence)),
     "exactly one input named 'sequence'"
 )
-expect_error(
-    Rllm:::.rllm_f32_forward(native_model, list(sequence = sequence), backend = "cuda"),
-    "CUDA backend unavailable"
-)
+# Without a device the CUDA request must fail by name; with one it must agree
+# with the CPU path, whose convolutions absorb operators the device graph keeps.
+if (isTRUE(Rggml::rggml_has_cuda())) {
+    device <- Rllm:::.rllm_f32_forward(
+        native_model, list(sequence = sequence), backend = "cuda"
+    )$probabilities
+    expect_equal(dim(device), dim(native))
+    # cuBLAS uses TF32 tensor cores for F32 products by default on Ampere and
+    # later, so the device tolerance is wider than F32 accumulation error.
+    expect_equal(device, native, tolerance = 5e-3)
+} else {
+    expect_error(
+        Rllm:::.rllm_f32_forward(native_model, list(sequence = sequence),
+                                 backend = "cuda"),
+        "CUDA backend unavailable"
+    )
+}
 bad_model <- native_model
 add_at <- which(vapply(
     bad_model$execution$program$nodes, `[[`, character(1), "op"
