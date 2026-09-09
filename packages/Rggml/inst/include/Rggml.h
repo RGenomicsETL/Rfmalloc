@@ -253,6 +253,13 @@ typedef Rggml_conv_1d_f32_plan *(*Rggml_conv_1d_f32_plan_create_fun)(
     int64_t output_channels, int64_t stride, int64_t padding,
     int64_t dilation, int64_t max_output_channels);
 typedef void (*Rggml_conv_1d_f32_plan_destroy_fun)(Rggml_conv_1d_f32_plan *plan);
+/* Fold a per-input-channel affine, a leaky rectification, or both into the
+ * plan's gather, before any graph refers to it. The plan copies the arrays.
+ * Returns non-zero and changes nothing when the arguments do not describe the
+ * plan's input, so a caller that cannot fuse simply emits its own nodes. */
+typedef int (*Rggml_conv_1d_f32_plan_fuse_input_fun)(
+    Rggml_conv_1d_f32_plan *plan, const float *scale, const float *shift,
+    size_t channel_bytes, int leaky, double slope);
 typedef struct ggml_tensor *(*Rggml_conv_1d_f32_plan_apply_fun)(
     struct ggml_context *ctx, const Rggml_conv_1d_f32_plan *plan,
     struct ggml_tensor *input);
@@ -594,6 +601,12 @@ static inline Rggml_conv_1d_f32_plan_destroy_fun Rggml_conv_1d_f32_plan_destroy_
 {
     return (Rggml_conv_1d_f32_plan_destroy_fun)
         R_GetCCallable("Rggml", "Rggml_conv_1d_f32_plan_destroy");
+}
+
+static inline Rggml_conv_1d_f32_plan_fuse_input_fun Rggml_conv_1d_f32_plan_fuse_input_ptr(void)
+{
+    return (Rggml_conv_1d_f32_plan_fuse_input_fun)
+        R_GetCCallable("Rggml", "Rggml_conv_1d_f32_plan_fuse_input");
 }
 
 static inline Rggml_conv_1d_f32_plan_apply_fun Rggml_conv_1d_f32_plan_apply_ptr(void)

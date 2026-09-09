@@ -35,6 +35,10 @@ SEXP RC_rggml_test_conv1d_f32(SEXP kernel_sexp, SEXP input_sexp,
 SEXP RC_rggml_test_conv1d_f32_bounds(void);
 SEXP RC_rggml_test_leaky_relu_cpu(SEXP input_sexp, SEXP slope_sexp,
                                   SEXP threads_sexp);
+SEXP RC_rggml_test_conv1d_fused(SEXP kernel_sexp, SEXP input_sexp, SEXP bias_sexp,
+                                SEXP scale_sexp, SEXP shift_sexp, SEXP slope_sexp,
+                                SEXP stride_sexp, SEXP padding_sexp,
+                                SEXP dilation_sexp);
 
 static const R_CallMethodDef CallEntries[] = {
     {"RC_rggml_version",           (DL_FUNC) &RC_rggml_version,           0},
@@ -50,6 +54,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"RC_rggml_test_conv1d_f32",   (DL_FUNC) &RC_rggml_test_conv1d_f32,   6},
     {"RC_rggml_test_conv1d_f32_bounds", (DL_FUNC) &RC_rggml_test_conv1d_f32_bounds, 0},
     {"RC_rggml_test_leaky_relu_cpu", (DL_FUNC) &RC_rggml_test_leaky_relu_cpu, 3},
+    {"RC_rggml_test_conv1d_fused", (DL_FUNC) &RC_rggml_test_conv1d_fused, 9},
     {NULL, NULL, 0}
 };
 
@@ -136,6 +141,7 @@ static void register_c_callables(DllInfo *dll)
     R_RegisterCCallable("Rggml", "Rggml_conv_1d",               (DL_FUNC) Rggml_conv_1d);
     R_RegisterCCallable("Rggml", "Rggml_conv_1d_f32_plan_create", (DL_FUNC) Rggml_conv_1d_f32_plan_create);
     R_RegisterCCallable("Rggml", "Rggml_conv_1d_f32_plan_destroy", (DL_FUNC) Rggml_conv_1d_f32_plan_destroy);
+    R_RegisterCCallable("Rggml", "Rggml_conv_1d_f32_plan_fuse_input", (DL_FUNC) Rggml_conv_1d_f32_plan_fuse_input);
     R_RegisterCCallable("Rggml", "Rggml_conv_1d_f32_plan_apply", (DL_FUNC) Rggml_conv_1d_f32_plan_apply);
     R_RegisterCCallable("Rggml", "Rggml_leaky_relu",            (DL_FUNC) Rggml_leaky_relu);
     R_RegisterCCallable("Rggml", "Rggml_leaky_relu_cpu",        (DL_FUNC) Rggml_leaky_relu_cpu);

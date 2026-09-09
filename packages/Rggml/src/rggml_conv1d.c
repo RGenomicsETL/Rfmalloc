@@ -106,12 +106,31 @@ Rggml_conv_1d_f32_plan_create(const float *kernel, size_t kernel_bytes,
      * for `tile_positions` output positions. Both are chosen so one tile fits
      * the bounded stack buffer, and a deep kernel is accumulated in passes. */
     positions = RGGML_CONV1D_TILE_POSITIONS;
-    if (positions > RGGML_CONV1D_TILE_MAX_FLOATS) positions = RGGML_CONV1D_TILE_MAX_FLOATS;
-    rows = RGGML_CONV1D_TILE_MAX_FLOATS / positions;
-    if (rows > kernel_size * input_channels) rows = kernel_size * input_channels;
-    if (rows < 1) rows = 1;
+    if (input_channels > RGGML_CONV1D_MAX_ROWS) {
+        free(plan->sync);
+        free(plan->packed);
+        free(plan->bias);
+        free(plan);
+        return NULL;
+    }
+    /* Per-channel float budget for one pass. Positions shrink first, then the
+     * number of taps a pass covers; both gather forms must fit it. */
+    {
+        const int64_t budget = RGGML_CONV1D_TILE_MAX_FLOATS / input_channels;
+        int64_t general;
+
+        if (positions > budget) positions = budget;
+        rows = (budget - positions) / dilation + 1;
+        general = budget / positions;
+        if (rows > general) rows = general;
+        if (rows > RGGML_CONV1D_MAX_ROWS / input_channels) {
+            rows = RGGML_CONV1D_MAX_ROWS / input_channels;
+        }
+        if (rows > kernel_size) rows = kernel_size;
+        if (rows < 1) rows = 1;
+    }
     plan->tile_positions = positions;
-    plan->tile_rows = rows;
+    plan->tile_taps = rows;
 
     /* GGUF/GGML source layout is [K, IC, OC], K contiguous. The packed layout
      * makes one (tap, input channel) row address a contiguous OC block. */
@@ -132,19 +151,73 @@ void
 Rggml_conv_1d_f32_plan_destroy(struct Rggml_conv_1d_f32_plan *plan)
 {
     if (!plan) return;
+    free(plan->input_shift);
+    free(plan->input_scale);
     free(plan->sync);
     free(plan->bias);
     free(plan->packed);
     free(plan);
 }
 
+/* Fold a per-input-channel affine, a leaky rectification, or both into the
+ * gather. Either array may be NULL. The plan copies what it is given, so the
+ * caller keeps ownership of its own storage. Returns non-zero and changes
+ * nothing when the arguments do not describe this plan's input. */
+int
+Rggml_conv_1d_f32_plan_fuse_input(struct Rggml_conv_1d_f32_plan *plan,
+    const float *scale, const float *shift, size_t channel_bytes,
+    int leaky, double slope)
+{
+    size_t required;
+    float *scale_copy = NULL, *shift_copy = NULL;
+
+    if (!plan || plan->input_scale || plan->input_shift || plan->leaky) return -1;
+    if (leaky && !(slope >= -1e30 && slope <= 1e30)) return -1;
+    if (scale || shift) {
+        if (rggml_conv1d_mul((size_t) plan->input_channels, sizeof(float), &required) ||
+            channel_bytes < required) return -1;
+        if (scale) {
+            scale_copy = malloc(required);
+            if (!scale_copy) return -1;
+            memcpy(scale_copy, scale, required);
+        }
+        if (shift) {
+            shift_copy = malloc(required);
+            if (!shift_copy) {
+                free(scale_copy);
+                return -1;
+            }
+            memcpy(shift_copy, shift, required);
+        }
+    }
+    plan->input_scale = scale_copy;
+    plan->input_shift = shift_copy;
+    plan->leaky = leaky ? 1 : 0;
+    plan->leaky_slope = (float) slope;
+    return 0;
+}
+
 void
-rggml_conv1d_f32_tile_scalar(float *dst, int64_t dst_stride, const float *tile,
-    const float *weights, int64_t rows, int64_t positions,
-    int64_t output_channels)
+rggml_conv1d_f32_activate_scalar(float *dst, const float *src, int64_t n,
+    float scale, float shift, int leaky, float slope)
+{
+    if (leaky) {
+        for (int64_t i = 0; i < n; ++i) {
+            const float v = src[i] * scale + shift;
+            dst[i] = v > 0.0f ? v : v * slope;
+        }
+        return;
+    }
+    for (int64_t i = 0; i < n; ++i) dst[i] = src[i] * scale + shift;
+}
+
+void
+rggml_conv1d_f32_tile_scalar(float *dst, int64_t dst_stride,
+    const float *const *rows_at, const float *weights, int64_t rows,
+    int64_t positions, int64_t output_channels)
 {
     for (int64_t row = 0; row < rows; ++row) {
-        const float *x = tile + row * positions;
+        const float *x = rows_at[row];
         const float *w = weights + row * output_channels;
         for (int64_t oc = 0; oc < output_channels; ++oc) {
             float *out = dst + oc * dst_stride;
@@ -154,38 +227,66 @@ rggml_conv1d_f32_tile_scalar(float *dst, int64_t dst_stride, const float *tile,
     }
 }
 
-/* Gather rows [row0, row0 + rows) of the (tap, input channel) space for one
- * batch element and `positions` output positions starting at `first`. Taps
- * that fall outside the padded input contribute zero. */
+/* Gather one channel's input window for a tap range, zero outside the padded
+ * input, and apply the folded activation once over it. A unit-stride
+ * convolution then reads every tap of that channel as an overlapping slice. */
 static void
-rggml_conv1d_f32_gather(float *tile, const struct ggml_tensor *input,
-    const struct Rggml_conv_1d_f32_plan *plan, int64_t batch, int64_t first,
-    int64_t positions, int64_t row0, int64_t rows)
+rggml_conv1d_f32_window(float *window, const struct ggml_tensor *input,
+    const struct Rggml_conv_1d_f32_plan *plan, int64_t batch, int64_t channel,
+    int64_t start, int64_t span)
 {
     const int64_t length = input->ne[0];
-    const int64_t channels = plan->input_channels;
-    const char *base = (const char *) input->data + (size_t) batch * input->nb[2];
-    const int contiguous = plan->stride == 1 && input->nb[0] == sizeof(float);
+    const char *source = (const char *) input->data +
+        (size_t) batch * input->nb[2] + (size_t) channel * input->nb[1];
+    const int64_t from = start < 0 ? 0 : start;
+    const int64_t to = start + span < length ? start + span : length;
 
-    for (int64_t row = 0; row < rows; ++row) {
-        const int64_t tap = (row0 + row) / channels;
-        const int64_t channel = (row0 + row) % channels;
-        const char *source = base + (size_t) channel * input->nb[1];
-        float *out = tile + row * positions;
-        const int64_t start = first * plan->stride + tap * plan->dilation -
-            plan->padding;
+    for (int64_t i = 0; i < span; ++i) window[i] = 0.0f;
+    if (from >= to) return;
+    memcpy(window + (from - start), source + (size_t) from * sizeof(float),
+           (size_t) (to - from) * sizeof(float));
+    /* Only what the input actually holds is activated. Padding is zero in the
+     * convolution's own terms, which is not what a folded affine would make of
+     * a zero, so the padded positions stay untouched. */
+    if (plan->input_scale || plan->input_shift || plan->leaky) {
+        rggml_conv1d_f32_activate(window + (from - start),
+            window + (from - start), to - from,
+            plan->input_scale ? plan->input_scale[channel] : 1.0f,
+            plan->input_shift ? plan->input_shift[channel] : 0.0f,
+            plan->leaky, plan->leaky_slope);
+    }
+}
 
-        if (contiguous && start >= 0 && start + positions <= length) {
-            memcpy(out, source + (size_t) start * sizeof(float),
-                   (size_t) positions * sizeof(float));
-            continue;
+/* Gather one (tap, input channel) row directly. This is the general form: it
+ * serves any stride, and there the taps of one channel are not one window. */
+static void
+rggml_conv1d_f32_row(float *out, const struct ggml_tensor *input,
+    const struct Rggml_conv_1d_f32_plan *plan, int64_t batch, int64_t channel,
+    int64_t start, int64_t positions)
+{
+    const int64_t length = input->ne[0];
+    const char *source = (const char *) input->data +
+        (size_t) batch * input->nb[2] + (size_t) channel * input->nb[1];
+
+    int64_t low = positions, high = 0;
+
+    for (int64_t p = 0; p < positions; ++p) {
+        const int64_t at = start + p * plan->stride;
+        if (at >= 0 && at < length) {
+            out[p] = *(const float *) (source + (size_t) at * input->nb[0]);
+            if (p < low) low = p;
+            high = p + 1;
+        } else {
+            out[p] = 0.0f;
         }
-        for (int64_t p = 0; p < positions; ++p) {
-            const int64_t at = start + p * plan->stride;
-            out[p] = (at >= 0 && at < length)
-                ? *(const float *) (source + (size_t) at * input->nb[0])
-                : 0.0f;
-        }
+    }
+    /* The positions the input covers are one run, because the stride is
+     * positive. Padding outside it stays zero rather than being activated. */
+    if (low < high && (plan->input_scale || plan->input_shift || plan->leaky)) {
+        rggml_conv1d_f32_activate(out + low, out + low, high - low,
+            plan->input_scale ? plan->input_scale[channel] : 1.0f,
+            plan->input_shift ? plan->input_shift[channel] : 0.0f,
+            plan->leaky, plan->leaky_slope);
     }
 }
 
@@ -193,15 +294,20 @@ static void
 rggml_conv1d_f32_item(struct ggml_tensor *dst, const struct ggml_tensor *input,
     const struct Rggml_conv_1d_f32_plan *plan, int64_t item, int64_t blocks)
 {
-    float tile[RGGML_CONV1D_TILE_MAX_FLOATS];
+    float scratch[RGGML_CONV1D_TILE_MAX_FLOATS];
+    const float *rows_at[RGGML_CONV1D_MAX_ROWS];
     const int64_t nout = dst->ne[0];
     const int64_t channels = dst->ne[1];
+    const int64_t in_channels = plan->input_channels;
     const int64_t batch = item / blocks;
     const int64_t first = (item - batch * blocks) * plan->tile_positions;
     const int64_t positions = plan->tile_positions < nout - first
         ? plan->tile_positions : nout - first;
     const int64_t stride = (int64_t) (dst->nb[1] / sizeof(float));
-    const int64_t rows = plan->kernel * plan->input_channels;
+    const int64_t taps_per_pass = plan->tile_taps;
+    const int64_t windowed = plan->stride == 1 && input->nb[0] == sizeof(float);
+    const int64_t span = windowed
+        ? positions + (taps_per_pass - 1) * plan->dilation : positions;
     float *out = (float *) ((char *) dst->data + (size_t) batch * dst->nb[2]) + first;
 
     for (int64_t oc = 0; oc < channels; ++oc) {
@@ -209,17 +315,40 @@ rggml_conv1d_f32_item(struct ggml_tensor *dst, const struct ggml_tensor *input,
         const float value = plan->bias ? plan->bias[oc] : 0.0f;
         for (int64_t p = 0; p < positions; ++p) row[p] = value;
     }
-    for (int64_t row0 = 0; row0 < rows; row0 += plan->tile_rows) {
-        const int64_t take = plan->tile_rows < rows - row0
-            ? plan->tile_rows : rows - row0;
-        rggml_conv1d_f32_gather(tile, input, plan, batch, first, positions,
-                                row0, take);
+    for (int64_t tap0 = 0; tap0 < plan->kernel; tap0 += taps_per_pass) {
+        const int64_t taps = taps_per_pass < plan->kernel - tap0
+            ? taps_per_pass : plan->kernel - tap0;
+        const int64_t base = first * plan->stride + tap0 * plan->dilation -
+            plan->padding;
+        int64_t rows = 0;
+
+        for (int64_t channel = 0; channel < in_channels; ++channel) {
+            if (windowed) {
+                rggml_conv1d_f32_window(scratch + channel * span, input, plan,
+                                        batch, channel, base,
+                                        positions + (taps - 1) * plan->dilation);
+            }
+        }
+        for (int64_t tap = 0; tap < taps; ++tap) {
+            for (int64_t channel = 0; channel < in_channels; ++channel) {
+                float *at = scratch + (windowed
+                    ? channel * span + tap * plan->dilation
+                    : rows * positions);
+                if (!windowed) {
+                    rggml_conv1d_f32_row(at, input, plan, batch, channel,
+                        base + tap * plan->dilation, positions);
+                }
+                rows_at[rows++] = at;
+            }
+        }
         if (plan->scalar_only) {
-            rggml_conv1d_f32_tile_scalar(out, stride, tile,
-                plan->packed + row0 * channels, take, positions, channels);
+            rggml_conv1d_f32_tile_scalar(out, stride, rows_at,
+                plan->packed + tap0 * in_channels * channels, rows, positions,
+                channels);
         } else {
-            rggml_conv1d_f32_tile(out, stride, tile,
-                plan->packed + row0 * channels, take, positions, channels);
+            rggml_conv1d_f32_tile(out, stride, rows_at,
+                plan->packed + tap0 * in_channels * channels, rows, positions,
+                channels);
         }
     }
 }

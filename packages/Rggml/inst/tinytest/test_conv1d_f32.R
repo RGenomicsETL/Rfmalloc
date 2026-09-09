@@ -40,3 +40,23 @@ expect_error(
 )
 
 message("packed direct F32 conv1d differential tests completed")
+
+# Folding a channel affine and a leaky rectification into the gather must be
+# the same computation as staging them as operators before the convolution.
+check_fused <- function(k, ic, oc, n, batch, stride, padding, dilation, slope) {
+  set.seed(k * 1000L + ic * 100L + oc + batch)
+  kernel <- array(rnorm(k * ic * oc, sd = 0.2), dim = c(k, ic, oc))
+  input <- array(rnorm(n * ic * batch), dim = c(n, ic, batch))
+  got <- Rggml:::rggml_test_conv1d_fused(
+    kernel, input, rnorm(oc, sd = 0.1), runif(ic, 0.5, 1.5), rnorm(ic, sd = 0.3),
+    slope, stride = stride, padding = padding, dilation = dilation
+  )
+  expect_equal(got$fused, got$staged, tolerance = 2e-5)
+}
+
+check_fused(11L, 32L, 32L, 41L, 2L, 1L, 5L, 1L, 0.1)
+check_fused(11L, 32L, 32L, 37L, 1L, 1L, 20L, 4L, 0.01)
+check_fused(1L, 5L, 7L, 13L, 3L, 2L, 0L, 1L, 0.2)
+check_fused(3L, 9L, 16L, 17L, 2L, 1L, 2L, 2L, 0.0)
+
+message("folded input activation differential tests completed")

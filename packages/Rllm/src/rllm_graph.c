@@ -1564,6 +1564,81 @@ static const float *rllm_f32_parameter_data(SEXP tensors, const char *name,
     return (const float *) data;
 }
 
+static int rllm_f32_source_index(SEXP nodes, int before, SEXP node, int input)
+{
+    SEXP refs = rllm_list_elt(node, "inputs");
+    if (TYPEOF(refs) != STRSXP || input < 0 || input >= XLENGTH(refs)) {
+        Rf_error("native F32 node has an invalid input reference");
+    }
+    const char *id = CHAR(STRING_ELT(refs, input));
+    for (int i = 0; i < before; ++i) {
+        if (!strcmp(rllm_string(VECTOR_ELT(nodes, i), "id"), id)) return i;
+    }
+    Rf_error("native F32 node refers to a later or unknown input");
+    return -1;
+}
+
+/* Inference batch normalization is one affine pass per channel:
+ * scale = weight / sqrt(var + eps) and shift = bias - mean * scale. */
+static void rllm_f32_batch_norm_affine(SEXP node, SEXP tensors, int width,
+                                        Rfmalloc_storage_data_fun storage_data,
+                                        float *scale, float *shift)
+{
+    SEXP attributes = rllm_list_elt(node, "attributes");
+    const double eps = rllm_number(attributes, "eps");
+    const float *weight = rllm_f32_parameter_data(tensors,
+        rllm_f32_parameter(attributes, "weight"), width, NULL, storage_data);
+    const float *bias = rllm_f32_parameter_data(tensors,
+        rllm_f32_parameter(attributes, "bias"), width, NULL, storage_data);
+    const float *mean = rllm_f32_parameter_data(tensors,
+        rllm_f32_parameter(attributes, "running_mean"), width, NULL, storage_data);
+    const float *variance = rllm_f32_parameter_data(tensors,
+        rllm_f32_parameter(attributes, "running_var"), width, NULL, storage_data);
+
+    if (!R_FINITE(eps) || eps <= 0) {
+        Rf_error("native F32 batch normalization is invalid");
+    }
+    for (int j = 0; j < width; ++j) {
+        if (!R_FINITE(variance[j]) || variance[j] < 0) {
+            Rf_error("native F32 batch normalization variance is invalid");
+        }
+        scale[j] = weight[j] / sqrtf(variance[j] + (float) eps);
+        shift[j] = bias[j] - mean[j] * scale[j];
+    }
+}
+
+/* Count how many nodes, plus the declared outputs, read each node. Only a
+ * value read exactly once can be folded into its single reader. */
+static void rllm_f32_count_uses(SEXP nodes, SEXP outputs, int *uses)
+{
+    const int n_nodes = (int) XLENGTH(nodes);
+    for (int i = 0; i < n_nodes; ++i) uses[i] = 0;
+    for (int i = 0; i < n_nodes; ++i) {
+        SEXP refs = rllm_list_elt(VECTOR_ELT(nodes, i), "inputs");
+        if (TYPEOF(refs) != STRSXP) continue;
+        for (R_xlen_t j = 0; j < XLENGTH(refs); ++j) {
+            const char *id = CHAR(STRING_ELT(refs, j));
+            for (int k = 0; k < i; ++k) {
+                if (!strcmp(rllm_string(VECTOR_ELT(nodes, k), "id"), id)) {
+                    ++uses[k];
+                    break;
+                }
+            }
+        }
+    }
+    for (R_xlen_t o = 0; o < XLENGTH(outputs); ++o) {
+        SEXP ref = VECTOR_ELT(outputs, o);
+        if (TYPEOF(ref) != STRSXP || XLENGTH(ref) != 1) continue;
+        const char *id = CHAR(STRING_ELT(ref, 0));
+        for (int k = 0; k < (int) XLENGTH(nodes); ++k) {
+            if (!strcmp(rllm_string(VECTOR_ELT(nodes, k), "id"), id)) {
+                ++uses[k];
+                break;
+            }
+        }
+    }
+}
+
 /* Persistent fixed-shape F32 execution. The protected owner retains CPU
  * mapped payload spans, and additionally the CUDA weight context when used.
  * A CPU execution context owns its backend; a CUDA execution context borrows
@@ -1809,6 +1884,8 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
         Rggml_conv_1d_f32_plan_apply_ptr();
     Rggml_conv_1d_f32_plan_destroy_fun conv_plan_destroy =
         Rggml_conv_1d_f32_plan_destroy_ptr();
+    Rggml_conv_1d_f32_plan_fuse_input_fun conv_plan_fuse =
+        Rggml_conv_1d_f32_plan_fuse_input_ptr();
     Rggml_leaky_relu_fun leaky_relu = Rggml_leaky_relu_ptr();
     Rggml_leaky_relu_cpu_fun leaky_relu_cpu = Rggml_leaky_relu_cpu_ptr();
     Rggml_soft_max_fun soft_max = Rggml_soft_max_ptr();
@@ -1877,8 +1954,68 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
         if (!ctx->conv_plans) Rf_error("native F32 graph table allocation failed");
     }
     int n_uploads = 0;
+    /* A convolution that is the only reader of a normalization, of a leaky
+     * rectification, or of both in that order, absorbs them into its gather.
+     * Those nodes then emit nothing: no barrier, no pass over the activation. */
+    int *uses = (int *) R_alloc((size_t) n_nodes, sizeof(*uses));
+    int *fuse_norm = (int *) R_alloc((size_t) n_nodes, sizeof(*fuse_norm));
+    int *fuse_leaky = (int *) R_alloc((size_t) n_nodes, sizeof(*fuse_leaky));
+    int *fuse_source = (int *) R_alloc((size_t) n_nodes, sizeof(*fuse_source));
+    char *folded = (char *) R_alloc((size_t) n_nodes, sizeof(*folded));
+    rllm_f32_count_uses(nodes, outputs, uses);
+    for (int i = 0; i < n_nodes; ++i) {
+        fuse_norm[i] = fuse_leaky[i] = fuse_source[i] = -1;
+        folded[i] = 0;
+    }
+    if (!use_device) {
+        for (int i = 1; i < n_nodes; ++i) {
+            if (strcmp(rllm_string(VECTOR_ELT(nodes, i), "op"), "conv1d")) continue;
+            int at = rllm_f32_source_index(nodes, i, VECTOR_ELT(nodes, i), 0);
+            if (!strcmp(rllm_string(VECTOR_ELT(nodes, at), "op"), "leaky_relu") &&
+                uses[at] == 1) {
+                fuse_leaky[i] = at;
+                at = rllm_f32_source_index(nodes, at, VECTOR_ELT(nodes, at), 0);
+            }
+            if (!strcmp(rllm_string(VECTOR_ELT(nodes, at), "op"), "batch_norm") &&
+                uses[at] == 1) {
+                fuse_norm[i] = at;
+                at = rllm_f32_source_index(nodes, at, VECTOR_ELT(nodes, at), 0);
+            }
+            if (fuse_norm[i] >= 0 || fuse_leaky[i] >= 0) {
+                fuse_source[i] = at;
+                if (fuse_leaky[i] >= 0) folded[fuse_leaky[i]] = 1;
+                if (fuse_norm[i] >= 0) folded[fuse_norm[i]] = 1;
+            }
+        }
+    }
 #define RLLM_FX_FAIL(...) Rf_error(__VA_ARGS__)
 #define RLLM_FX_CHECK(x) do { if (!(x)) RLLM_FX_FAIL("native F32 graph construction failed (%s)", #x); } while (0)
+/* Emit whatever a convolution meant to absorb but could not, which happens
+ * only when no packed plan exists or the plan declines the fusion. */
+#define RLLM_FX_PREPARE(tensor) do {                                          \
+    if (scale) {                                                              \
+        int64_t affine_ne[3] = { 1, width, 1 };                               \
+        struct ggml_tensor *scale_tensor =                                    \
+            new_tensor(ctx->cctx, GGML_TYPE_F32, 3, affine_ne, NULL);         \
+        struct ggml_tensor *shift_tensor =                                    \
+            new_tensor(ctx->cctx, GGML_TYPE_F32, 3, affine_ne, NULL);         \
+        RLLM_FX_CHECK(scale_tensor && shift_tensor);                          \
+        rllm_f32_upload_add(uploads, &n_uploads, max_uploads, scale_tensor,   \
+                            scale, affine_bytes);                             \
+        rllm_f32_upload_add(uploads, &n_uploads, max_uploads, shift_tensor,   \
+                            shift, affine_bytes);                             \
+        (tensor) = add(ctx->cctx, mul(ctx->cctx, (tensor), scale_tensor),     \
+                       shift_tensor);                                         \
+        RLLM_FX_CHECK(tensor);                                                \
+    }                                                                         \
+    if (fuse_leaky[i] >= 0) {                                                 \
+        struct ggml_tensor *rectified = use_device                            \
+            ? NULL : leaky_relu_cpu(ctx->cctx, (tensor), slope);              \
+        if (!rectified) rectified = leaky_relu(ctx->cctx, (tensor), slope);   \
+        RLLM_FX_CHECK(rectified);                                             \
+        (tensor) = rectified;                                                 \
+    }                                                                         \
+} while (0)
 
     int64_t input_ne[3] = { sequence_length, channels, batch };
     ctx->input = new_tensor(ctx->cctx, GGML_TYPE_F32, 3, input_ne, NULL);
@@ -1888,8 +2025,11 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
         SEXP node = VECTOR_ELT(nodes, i);
         SEXP attributes = rllm_list_elt(node, "attributes");
         const char *op = rllm_string(node, "op");
+        if (folded[i]) continue;      /* absorbed by the convolution that reads it */
         if (!strcmp(op, "conv1d")) {
-            struct ggml_tensor *x = rllm_f32_source(values, nodes, i, node, 0);
+            struct ggml_tensor *x = fuse_source[i] >= 0
+                ? values[fuse_source[i]]
+                : rllm_f32_source(values, nodes, i, node, 0);
             const char *weight_name = rllm_f32_parameter(attributes, "weight");
             const char *bias_name = rllm_f32_parameter(attributes, "bias");
             int dilation = rllm_integer(attributes, "dilation");
@@ -1898,7 +2038,7 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
             struct ggml_tensor *weight = rllm_named_weight(
                 use_device ? cuda_ctx->wctx : ctx->wctx, tensors, weight_name,
                 new_tensor, storage_data, NULL, NULL, 0, cuda_ctx);
-            if (!weight || weight->ne[1] != x->ne[1] || dilation < 1 ||
+            if (!x || !weight || weight->ne[1] != x->ne[1] || dilation < 1 ||
                 padding < 0 || stride < 1 || weight->ne[2] > INT_MAX) {
                 RLLM_FX_FAIL("native F32 convolution dimensions are inconsistent");
             }
@@ -1906,6 +2046,27 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
             size_t bias_bytes;
             const float *bias = rllm_f32_parameter_data(tensors, bias_name,
                 out_channels, &bias_bytes, storage_data);
+            /* Whatever this convolution absorbed is prepared here, so that a
+             * plan which declines the fusion still has ordinary nodes to fall
+             * back to. */
+            const int width = (int) x->ne[1];
+            size_t affine_bytes = 0;
+            float *scale = NULL, *shift = NULL;
+            double slope = 0;
+            if (fuse_norm[i] >= 0) {
+                if (width < 1 || rllm_f32_mul_size((size_t) width, sizeof(float),
+                                                   &affine_bytes)) {
+                    RLLM_FX_FAIL("native F32 batch normalization dimensions are invalid");
+                }
+                scale = (float *) R_alloc((size_t) width, sizeof(*scale));
+                shift = (float *) R_alloc((size_t) width, sizeof(*shift));
+                rllm_f32_batch_norm_affine(VECTOR_ELT(nodes, fuse_norm[i]),
+                                           tensors, width, storage_data, scale, shift);
+            }
+            if (fuse_leaky[i] >= 0) {
+                slope = rllm_number(rllm_list_elt(VECTOR_ELT(nodes, fuse_leaky[i]),
+                                                   "attributes"), "slope");
+            }
             if (!use_device) {
                 /* The CPU primitive copies and repacks the borrowed [K, IC, OC]
                  * mapping once. The graph then holds only the opaque plan; no
@@ -1924,6 +2085,11 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
                     /* Recorded before the graph refers to it, so the context
                      * finalizer owns it from here on. */
                     ctx->conv_plans[ctx->n_conv_plans++] = plan;
+                    if ((scale || fuse_leaky[i] >= 0) &&
+                        conv_plan_fuse(plan, scale, shift, affine_bytes,
+                                       fuse_leaky[i] >= 0, slope) != 0) {
+                        RLLM_FX_PREPARE(x);
+                    }
                     values[i] = conv_plan_apply(ctx->cctx, plan, x);
                     RLLM_FX_CHECK(values[i]);
                     continue;
@@ -1932,6 +2098,7 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
             /* CUDA custom callbacks are not CUDA operations. CUDA, and a CPU
              * shape that cannot admit a direct plan, keep the official F32
              * im2col/mul_mat composition as the independent fallback. */
+            if (scale || fuse_leaky[i] >= 0) RLLM_FX_PREPARE(x);
             values[i] = conv1d(ctx->cctx, weight, x, stride, padding, dilation);
             RLLM_FX_CHECK(values[i]);
             int64_t affine_ne[3] = { 1, out_channels, 1 };
@@ -1948,29 +2115,14 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
                 RLLM_FX_FAIL("native F32 batch normalization dimensions are invalid");
             }
             int width = (int) x->ne[1];
-            double eps = rllm_number(attributes, "eps");
-            const float *weight = rllm_f32_parameter_data(tensors,
-                rllm_f32_parameter(attributes, "weight"), width, NULL, storage_data);
-            const float *bias = rllm_f32_parameter_data(tensors,
-                rllm_f32_parameter(attributes, "bias"), width, NULL, storage_data);
-            const float *mean = rllm_f32_parameter_data(tensors,
-                rllm_f32_parameter(attributes, "running_mean"), width, NULL, storage_data);
-            const float *variance = rllm_f32_parameter_data(tensors,
-                rllm_f32_parameter(attributes, "running_var"), width, NULL, storage_data);
             size_t affine_bytes;
-            if (!R_FINITE(eps) || eps <= 0 ||
-                rllm_f32_mul_size((size_t) width, sizeof(float), &affine_bytes)) {
+            if (rllm_f32_mul_size((size_t) width, sizeof(float), &affine_bytes)) {
                 RLLM_FX_FAIL("native F32 batch normalization is invalid");
             }
             float *scale = (float *) R_alloc((size_t) width, sizeof(*scale));
             float *shift = (float *) R_alloc((size_t) width, sizeof(*shift));
-            for (int j = 0; j < width; ++j) {
-                if (!R_FINITE(variance[j]) || variance[j] < 0) {
-                    RLLM_FX_FAIL("native F32 batch normalization variance is invalid");
-                }
-                scale[j] = weight[j] / sqrtf(variance[j] + (float) eps);
-                shift[j] = bias[j] - mean[j] * scale[j];
-            }
+            rllm_f32_batch_norm_affine(node, tensors, width, storage_data,
+                                       scale, shift);
             int64_t affine_ne[3] = { 1, width, 1 };
             struct ggml_tensor *scale_tensor = new_tensor(ctx->cctx, GGML_TYPE_F32, 3, affine_ne, NULL);
             struct ggml_tensor *shift_tensor = new_tensor(ctx->cctx, GGML_TYPE_F32, 3, affine_ne, NULL);

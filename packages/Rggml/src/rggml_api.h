@@ -173,6 +173,9 @@ struct Rggml_conv_1d_f32_plan *Rggml_conv_1d_f32_plan_create(
     int64_t output_channels, int64_t stride, int64_t padding,
     int64_t dilation, int64_t max_output_channels);
 void Rggml_conv_1d_f32_plan_destroy(struct Rggml_conv_1d_f32_plan *plan);
+int Rggml_conv_1d_f32_plan_fuse_input(struct Rggml_conv_1d_f32_plan *plan,
+    const float *scale, const float *shift, size_t channel_bytes,
+    int leaky, double slope);
 struct ggml_tensor *Rggml_conv_1d_f32_plan_apply(
     struct ggml_context *ctx, const struct Rggml_conv_1d_f32_plan *plan,
     struct ggml_tensor *input);

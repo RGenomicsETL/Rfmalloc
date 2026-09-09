@@ -17,3 +17,12 @@ rggml_test_leaky_relu_cpu <- function(x, slope, threads = 1L) {
   storage.mode(x) <- "double"
   .Call("RC_rggml_test_leaky_relu_cpu", x, as.double(slope), as.integer(threads))
 }
+
+rggml_test_conv1d_fused <- function(kernel, input, bias, scale, shift, slope,
+                                    stride = 1L, padding = 0L, dilation = 1L) {
+  .Call(
+    "RC_rggml_test_conv1d_fused", as.array(kernel), as.array(input),
+    as.double(bias), as.double(scale), as.double(shift), as.double(slope),
+    as.integer(stride), as.integer(padding), as.integer(dilation)
+  )
+}

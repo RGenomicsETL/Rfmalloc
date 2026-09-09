@@ -1,5 +1,11 @@
 # Rllm 0.1.0 (unreleased)
 
+- The native F32 CPU lowering folds a batch normalization and a leaky
+  rectification into the convolution that is their only reader, so an
+  OpenSpliceAI residual block emits two nodes where it used to emit seven. A
+  convolution that cannot take the fusion, and every device graph, still emits
+  the operators as before.
+
 - The native F32 CPU lowering now uses Rggml's worker-split leaky ReLU and its
   retiled convolution kernel. On the i5-13500 the real MANE 400 nt
   OpenSpliceAI checkpoint at `[4, 416, 128]` went from 260.1 ms to 59.5 ms per

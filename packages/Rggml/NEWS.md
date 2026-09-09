@@ -1,5 +1,14 @@
 # Rggml 0.1.0 (unreleased)
 
+- The packed F32 conv1d plan can absorb a per-input-channel affine, a leaky
+  rectification, or both, through `Rggml_conv_1d_f32_plan_fuse_input()`. A
+  unit-stride convolution gathers each input channel as one window, activates
+  it once, and reads every tap as an overlapping slice of it, so the folded
+  operators cost one pass over the input rather than one graph node, one
+  barrier and two passes over the activation each. Padding stays zero under a
+  folded affine, which is what the unfolded operators compute, and a focused
+  differential test pins the two forms against each other.
+
 - Rewrote the packed F32 conv1d kernel around output tiles. A work item now
   gathers its own `[tap * channel][position]` tile, so padding, stride and
   dilation leave the inner loop, and the AVX2 form keeps twelve accumulators,

@@ -845,6 +845,149 @@ done:
     return status;
 }
 
+/* Differential proof for the folded input activation: one graph computes the
+ * convolution of a normalized, rectified input twice, once with the affine and
+ * the rectification folded into the plan's gather and once with them staged as
+ * ordinary operators ahead of an unfolded plan. */
+SEXP
+RC_rggml_test_conv1d_fused(SEXP kernel_sexp, SEXP input_sexp, SEXP bias_sexp,
+                           SEXP scale_sexp, SEXP shift_sexp, SEXP slope_sexp,
+                           SEXP stride_sexp, SEXP padding_sexp,
+                           SEXP dilation_sexp)
+{
+    Rggml_context_create_fun context_create = Rggml_context_create_ptr();
+    Rggml_context_free_fun context_free = Rggml_context_free_ptr();
+    Rggml_tensor_overhead_fun tensor_overhead = Rggml_tensor_overhead_ptr();
+    Rggml_graph_overhead_fun graph_overhead = Rggml_graph_overhead_ptr();
+    Rggml_new_tensor_fun new_tensor = Rggml_new_tensor_ptr();
+    Rggml_new_graph_fun new_graph = Rggml_new_graph_ptr();
+    Rggml_build_forward_expand_fun expand = Rggml_build_forward_expand_ptr();
+    Rggml_backend_alloc_ctx_tensors_fun alloc = Rggml_backend_alloc_ctx_tensors_ptr();
+    Rggml_backend_buffer_free_fun buffer_free = Rggml_backend_buffer_free_ptr();
+    Rggml_backend_tensor_set_fun tensor_set = Rggml_backend_tensor_set_ptr();
+    Rggml_backend_tensor_get_fun tensor_get = Rggml_backend_tensor_get_ptr();
+    Rggml_backend_cpu_init_fun cpu_init = Rggml_backend_cpu_init_ptr();
+    Rggml_backend_free_fun backend_free = Rggml_backend_free_ptr();
+    Rggml_backend_graph_compute_fun compute = Rggml_backend_graph_compute_ptr();
+    Rggml_conv_1d_f32_plan_create_fun plan_create = Rggml_conv_1d_f32_plan_create_ptr();
+    Rggml_conv_1d_f32_plan_destroy_fun plan_destroy = Rggml_conv_1d_f32_plan_destroy_ptr();
+    Rggml_conv_1d_f32_plan_apply_fun plan_apply = Rggml_conv_1d_f32_plan_apply_ptr();
+    Rggml_conv_1d_f32_plan_fuse_input_fun plan_fuse = Rggml_conv_1d_f32_plan_fuse_input_ptr();
+    Rggml_leaky_relu_fun leaky = Rggml_leaky_relu_ptr();
+    Rggml_mul_fun mul = Rggml_mul_ptr();
+    Rggml_add_fun add = Rggml_add_ptr();
+    SEXP kernel_dim = Rf_getAttrib(kernel_sexp, R_DimSymbol);
+    SEXP input_dim = Rf_getAttrib(input_sexp, R_DimSymbol);
+    const int stride = Rf_asInteger(stride_sexp);
+    const int padding = Rf_asInteger(padding_sexp);
+    const int dilation = Rf_asInteger(dilation_sexp);
+    const double slope = Rf_asReal(slope_sexp);
+    struct ggml_context *ctx = NULL;
+    ggml_backend_t backend = NULL;
+    ggml_backend_buffer_t buffer = NULL;
+    Rggml_conv_1d_f32_plan *fused = NULL, *staged = NULL;
+    struct ggml_tensor *x, *scale_t, *shift_t, *a, *b, *prepared;
+    struct ggml_cgraph *graph;
+    int64_t k, ic, oc, n, batch, out_len;
+    float *kernel_f, *bias_f, *scale_f, *shift_f, *input_f;
+    SEXP out = R_NilValue;
+
+    if (TYPEOF(kernel_sexp) != REALSXP || TYPEOF(input_sexp) != REALSXP ||
+        TYPEOF(kernel_dim) != INTSXP || XLENGTH(kernel_dim) != 3 ||
+        TYPEOF(input_dim) != INTSXP || XLENGTH(input_dim) != 3 ||
+        stride < 1 || padding < 0 || dilation < 1 || !R_FINITE(slope)) {
+        Rf_error("fused conv1d test needs [K, IC, OC] and [N, IC, B] arrays and valid geometry");
+    }
+    k = INTEGER(kernel_dim)[0]; ic = INTEGER(kernel_dim)[1]; oc = INTEGER(kernel_dim)[2];
+    n = INTEGER(input_dim)[0]; batch = INTEGER(input_dim)[2];
+    if (INTEGER(input_dim)[1] != ic || XLENGTH(bias_sexp) != oc ||
+        XLENGTH(scale_sexp) != ic || XLENGTH(shift_sexp) != ic ||
+        rggml_test_conv_output_length(n, stride, padding, dilation, k, &out_len)) {
+        Rf_error("fused conv1d test dimensions are invalid");
+    }
+    kernel_f = (float *) R_alloc((size_t) (k * ic * oc), sizeof(float));
+    bias_f = (float *) R_alloc((size_t) oc, sizeof(float));
+    scale_f = (float *) R_alloc((size_t) ic, sizeof(float));
+    shift_f = (float *) R_alloc((size_t) ic, sizeof(float));
+    input_f = (float *) R_alloc((size_t) (n * ic * batch), sizeof(float));
+    for (R_xlen_t i = 0; i < k * ic * oc; ++i) kernel_f[i] = (float) REAL(kernel_sexp)[i];
+    for (R_xlen_t i = 0; i < oc; ++i) bias_f[i] = (float) REAL(bias_sexp)[i];
+    for (R_xlen_t i = 0; i < ic; ++i) scale_f[i] = (float) REAL(scale_sexp)[i];
+    for (R_xlen_t i = 0; i < ic; ++i) shift_f[i] = (float) REAL(shift_sexp)[i];
+    for (R_xlen_t i = 0; i < n * ic * batch; ++i) input_f[i] = (float) REAL(input_sexp)[i];
+
+    ctx = context_create(32 * tensor_overhead() + graph_overhead(64) + 4096, 1);
+    backend = cpu_init();
+    if (!ctx || !backend) {
+        if (backend) backend_free(backend);
+        if (ctx) context_free(ctx);
+        Rf_error("fused conv1d test context or backend creation failed");
+    }
+    fused = plan_create(kernel_f, (size_t) k * ic * oc * sizeof(float), bias_f,
+                        (size_t) oc * sizeof(float), k, ic, oc, stride, padding,
+                        dilation, oc);
+    staged = plan_create(kernel_f, (size_t) k * ic * oc * sizeof(float), bias_f,
+                         (size_t) oc * sizeof(float), k, ic, oc, stride, padding,
+                         dilation, oc);
+    if (fused && plan_fuse(fused, scale_f, shift_f, (size_t) ic * sizeof(float),
+                           1, slope) != 0) {
+        plan_destroy(fused);
+        fused = NULL;
+    }
+    if (fused && staged) {
+        int64_t input_ne[3] = { n, ic, batch };
+        int64_t affine_ne[3] = { 1, ic, 1 };
+        x = new_tensor(ctx, GGML_TYPE_F32, 3, input_ne, NULL);
+        scale_t = new_tensor(ctx, GGML_TYPE_F32, 3, affine_ne, NULL);
+        shift_t = new_tensor(ctx, GGML_TYPE_F32, 3, affine_ne, NULL);
+        a = x ? plan_apply(ctx, fused, x) : NULL;
+        prepared = x && scale_t && shift_t
+            ? leaky(ctx, add(ctx, mul(ctx, x, scale_t), shift_t), slope) : NULL;
+        b = prepared ? plan_apply(ctx, staged, prepared) : NULL;
+        graph = a && b ? new_graph(ctx, 64) : NULL;
+        if (graph) {
+            expand(graph, a);
+            expand(graph, b);
+            buffer = alloc(ctx, backend);
+        }
+        if (buffer) {
+            const R_xlen_t total = (R_xlen_t) out_len * oc * batch;
+            tensor_set(x, input_f, 0, (size_t) n * ic * batch * sizeof(float));
+            tensor_set(scale_t, scale_f, 0, (size_t) ic * sizeof(float));
+            tensor_set(shift_t, shift_f, 0, (size_t) ic * sizeof(float));
+            if (compute(backend, graph) == 0) {
+                SEXP dim = PROTECT(Rf_allocVector(INTSXP, 3));
+                SEXP fused_out, staged_out, names;
+                float *values = (float *) R_alloc((size_t) total, sizeof(float));
+                INTEGER(dim)[0] = (int) out_len;
+                INTEGER(dim)[1] = (int) oc;
+                INTEGER(dim)[2] = (int) batch;
+                fused_out = PROTECT(Rf_allocArray(REALSXP, dim));
+                staged_out = PROTECT(Rf_allocArray(REALSXP, dim));
+                tensor_get(a, values, 0, (size_t) total * sizeof(float));
+                for (R_xlen_t i = 0; i < total; ++i) REAL(fused_out)[i] = values[i];
+                tensor_get(b, values, 0, (size_t) total * sizeof(float));
+                for (R_xlen_t i = 0; i < total; ++i) REAL(staged_out)[i] = values[i];
+                out = PROTECT(Rf_allocVector(VECSXP, 2));
+                SET_VECTOR_ELT(out, 0, fused_out);
+                SET_VECTOR_ELT(out, 1, staged_out);
+                names = PROTECT(Rf_allocVector(STRSXP, 2));
+                SET_STRING_ELT(names, 0, Rf_mkChar("fused"));
+                SET_STRING_ELT(names, 1, Rf_mkChar("staged"));
+                Rf_setAttrib(out, R_NamesSymbol, names);
+                UNPROTECT(5);
+            }
+        }
+    }
+    if (buffer) buffer_free(buffer);
+    if (staged) plan_destroy(staged);
+    if (fused) plan_destroy(fused);
+    backend_free(backend);
+    context_free(ctx);
+    if (out == R_NilValue) Rf_error("fused conv1d differential graph failed");
+    return out;
+}
+
 /* Differential proof for the worker-split leaky ReLU. Upstream computes the
  * operator on thread zero alone; this runs both forms in one graph, at a
  * caller-chosen thread count, and hands both results back for comparison. */
