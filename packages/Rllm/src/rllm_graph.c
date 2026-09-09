@@ -382,6 +382,78 @@ SEXP RC_rllm_cuda_model_context(SEXP tensors)
     return ext;
 }
 
+/* Transient GGML resources for one call. The validation helpers below raise R
+ * errors, and an R error longjmps past any local cleanup, so these resources
+ * are owned by a protected external pointer from the moment they exist:
+ * whatever the scope still holds is released when R collects that pointer. The
+ * success path releases it explicitly. A device scope borrows the model-owned
+ * backend and weight context and never frees them. */
+struct rllm_scope {
+    int own_backend;
+    ggml_backend_t backend;
+    struct ggml_context *wctx;
+    struct ggml_context *cctx;
+    ggml_backend_buffer_t cbuf;
+    Rggml_backend_free_fun backend_free;
+    Rggml_context_free_fun context_free;
+    Rggml_backend_buffer_free_fun buffer_free;
+};
+
+static void rllm_scope_release(struct rllm_scope *scope)
+{
+    if (!scope) return;
+    if (scope->cbuf) scope->buffer_free(scope->cbuf);
+    if (scope->cctx) scope->context_free(scope->cctx);
+    if (scope->own_backend) {
+        if (scope->wctx) scope->context_free(scope->wctx);
+        if (scope->backend) scope->backend_free(scope->backend);
+    }
+    scope->cbuf = NULL;
+    scope->cctx = NULL;
+    scope->wctx = NULL;
+    scope->backend = NULL;
+}
+
+static void rllm_scope_finalizer(SEXP ext)
+{
+    struct rllm_scope *scope = (struct rllm_scope *) R_ExternalPtrAddr(ext);
+    if (!scope) return;
+    R_ClearExternalPtr(ext);
+    rllm_scope_release(scope);
+    free(scope);
+}
+
+/* The returned pointer is unprotected for exactly as long as it takes the
+ * caller to PROTECT it, which is the usual constructor contract. */
+static SEXP rllm_scope_open(struct rllm_scope **out, int own_backend)
+{
+    SEXP ext = PROTECT(R_MakeExternalPtr(NULL, Rf_install("Rllm_execution_scope"),
+                                         R_NilValue));
+    R_RegisterCFinalizerEx(ext, rllm_scope_finalizer, FALSE);
+    struct rllm_scope *scope = calloc(1, sizeof(*scope));
+    if (!scope) {
+        UNPROTECT(1);
+        Rf_error("execution scope allocation failed");
+    }
+    scope->own_backend = own_backend;
+    scope->backend_free = Rggml_backend_free_ptr();
+    scope->context_free = Rggml_context_free_ptr();
+    scope->buffer_free = Rggml_backend_buffer_free_ptr();
+    R_SetExternalPtrAddr(ext, scope);
+    *out = scope;
+    UNPROTECT(1);
+    return ext;
+}
+
+static void rllm_scope_close(SEXP ext)
+{
+    struct rllm_scope *scope = (struct rllm_scope *) R_ExternalPtrAddr(ext);
+    if (!scope) return;
+    R_ClearExternalPtr(ext);
+    rllm_scope_release(scope);
+    free(scope);
+}
+
 /* Lower a validated, bound semantic program to one GGML graph. The R compiler
  * has already checked its dataflow and reduced it to this native operator
  * vocabulary; this code never dispatches on a model-family name. */
@@ -547,7 +619,6 @@ SEXP RC_rllm_program_forward(SEXP bound, SEXP tokens_sexp,
 
     /* -- resolve every C-callable up front ---------------------------------- */
     Rggml_context_create_fun     ctx_create = Rggml_context_create_ptr();
-    Rggml_context_free_fun       ctx_free   = Rggml_context_free_ptr();
     Rggml_new_tensor_fun         new_tensor = Rggml_new_tensor_ptr();
     Rggml_tensor_data_fun        tdata      = Rggml_tensor_data_ptr();
     Rggml_tensor_overhead_fun    t_over     = Rggml_tensor_overhead_ptr();
@@ -555,11 +626,9 @@ SEXP RC_rllm_program_forward(SEXP bound, SEXP tokens_sexp,
     Rggml_new_graph_fun          new_graph  = Rggml_new_graph_ptr();
     Rggml_build_forward_expand_fun expand   = Rggml_build_forward_expand_ptr();
     Rggml_backend_cpu_init_fun   cpu_init   = Rggml_backend_cpu_init_ptr();
-    Rggml_backend_free_fun       bfree      = Rggml_backend_free_ptr();
     Rggml_backend_graph_compute_fun compute = Rggml_backend_graph_compute_ptr();
     Rggml_backend_alloc_ctx_tensors_fun alloc_tensors =
         Rggml_backend_alloc_ctx_tensors_ptr();
-    Rggml_backend_buffer_free_fun buf_free = Rggml_backend_buffer_free_ptr();
     Rggml_backend_tensor_set_fun tensor_set = Rggml_backend_tensor_set_ptr();
     Rggml_backend_tensor_get_fun tensor_get = Rggml_backend_tensor_get_ptr();
     Rggml_mul_mat_fun            mul_mat    = Rggml_mul_mat_ptr();
@@ -597,15 +666,18 @@ SEXP RC_rllm_program_forward(SEXP bound, SEXP tokens_sexp,
     Rggml_cpy_fun                cpy        = Rggml_cpy_ptr();
     Rfmalloc_storage_data_fun    storage_data = Rfmalloc_storage_data_ptr();
 
+    struct rllm_scope *scope;
+    SEXP scope_ext = PROTECT(rllm_scope_open(&scope, !use_device));
+
     struct rllm_cuda_context *cuda_ctx = use_device
         ? rllm_cuda_context_get(backend_context, tensors) : NULL;
     ggml_backend_t backend = use_device ? cuda_ctx->backend : cpu_init();
     if (!backend) Rf_error("failed to initialize the GGML CPU backend");
+    scope->backend = backend;
 
     /* CPU tensors borrow the mapped GGUF bytes directly. CUDA tensors already
      * occupy the model-owned context created on the first device call. */
     if (XLENGTH(tensors) > INT_MAX - 2 * n_layer - 16) {
-        if (!use_device) bfree(backend);
         Rf_error("model has too many tensors");
     }
     const int n_weight_slots = (int)XLENGTH(tensors) + 2 * n_layer + 16;
@@ -621,10 +693,8 @@ SEXP RC_rllm_program_forward(SEXP bound, SEXP tokens_sexp,
     struct ggml_context *wctx = use_device ? cuda_ctx->wctx :
         ctx_create((size_t)(n_weight_slots + 8) * t_over() + 4096,
                    /*no_alloc=*/1);
-    if (!wctx) {
-        if (!use_device) bfree(backend);
-        Rf_error("weights context creation failed");
-    }
+    if (!wctx) Rf_error("weights context creation failed");
+    scope->wctx = wctx;
 
     /* -- compute context: structured size estimate, 2x slack ---------------- */
     const char *output_op = rllm_string(output_spec, "op");
@@ -638,25 +708,11 @@ SEXP RC_rllm_program_forward(SEXP bound, SEXP tokens_sexp,
         output_rows = rllm_integer(output_spec, "dimension");
         if (!strcmp(pooling, "mean")) output_cols = 1;
         else if (!strcmp(pooling, "none")) output_cols = S;
-        else {
-            if (!use_device) {
-                ctx_free(wctx);
-                bfree(backend);
-            }
-            Rf_error("unknown embedding pooling operator '%s'", pooling);
-        }
+        else Rf_error("unknown embedding pooling operator '%s'", pooling);
         if (output_rows < 1) {
-            if (!use_device) {
-                ctx_free(wctx);
-                bfree(backend);
-            }
             Rf_error("embedding output dimension must be positive");
         }
     } else {
-        if (!use_device) {
-            ctx_free(wctx);
-            bfree(backend);
-        }
         Rf_error("unknown output operator '%s'", output_op);
     }
 
@@ -672,19 +728,15 @@ SEXP RC_rllm_program_forward(SEXP bound, SEXP tokens_sexp,
         + g_over(graph_sz) + (1u << 20);
     struct ggml_context *cctx = ctx_create(cmem, /*no_alloc=*/use_device ? 1 : 0);
     if (!cctx) {
-        if (!use_device) {
-            ctx_free(wctx);
-            bfree(backend);
-        }
         Rf_error("compute context creation failed (%.1f MB)", cmem / 1048576.0);
     }
+    scope->cctx = cctx;
     ggml_backend_buffer_t cbuf = NULL;
 
-    /* The CUDA model context outlives this call; only transient allocations
-     * are released on an error. CPU still owns its backend and weight context. */
-#define RLLM_FAIL(...) do { if (cbuf) buf_free(cbuf); ctx_free(cctx); \
-                            if (!use_device) { ctx_free(wctx); bfree(backend); } \
-                            Rf_error(__VA_ARGS__); } while (0)
+    /* The scope owns every transient allocation, so failing is just raising the
+     * error: the CUDA model context outlives this call, and a CPU scope
+     * releases its own backend and weight context when R collects it. */
+#define RLLM_FAIL(...) Rf_error(__VA_ARGS__)
 #define RLLM_CHECK(t)  do { if (!(t)) RLLM_FAIL("graph construction failed (%s)", #t); } while (0)
 
     /* -- inputs: token ids and positions ------------------------------------ */
@@ -1400,6 +1452,7 @@ SEXP RC_rllm_program_forward(SEXP bound, SEXP tokens_sexp,
          * activations, inputs, cache mirror and result, then upload mutable
          * inputs through the backend-neutral transfer interface. */
         cbuf = alloc_tensors(cctx, backend);
+        scope->cbuf = cbuf;
         if (!cbuf) RLLM_FAIL("CUDA compute-buffer allocation failed");
         for (int i = 0; i < n_uploads; ++i) {
             tensor_set(uploads[i].tensor, uploads[i].data, 0, uploads[i].bytes);
@@ -1443,14 +1496,9 @@ SEXP RC_rllm_program_forward(SEXP bound, SEXP tokens_sexp,
         for (R_xlen_t i = 0; i < n; i++) op[i] = (double) lp[i];
     }
 
-    if (cbuf) buf_free(cbuf);
-    ctx_free(cctx);
-    if (!use_device) {
-        ctx_free(wctx);
-        bfree(backend);
-    }
+    rllm_scope_close(scope_ext);
 
-    UNPROTECT(1);
+    UNPROTECT(2);
     return out;
 
 #undef RLLM_CHECK
@@ -1547,11 +1595,12 @@ struct rllm_f32_context {
     Rggml_backend_free_fun backend_free;
 };
 
+/* Fixed data staged for one upload after the backend buffer exists. Every
+ * buffer it points at is R_alloc'd, so an error unwinds it with the call. */
 struct rllm_f32_upload {
     struct ggml_tensor *tensor;
     const void *data;
     size_t bytes;
-    void *owned;
 };
 
 static SEXP rllm_f32_context_tag(void)
@@ -1611,7 +1660,7 @@ static int rllm_f32_product3(int a, int b, int c, R_xlen_t *out,
 
 static void rllm_f32_upload_add(struct rllm_f32_upload *uploads, int *n,
                                  int max, struct ggml_tensor *tensor,
-                                 const void *data, size_t bytes, void *owned)
+                                 const void *data, size_t bytes)
 {
     if (*n >= max || !tensor || !data || !bytes) {
         Rf_error("native F32 fixed-data upload table overflow");
@@ -1619,15 +1668,7 @@ static void rllm_f32_upload_add(struct rllm_f32_upload *uploads, int *n,
     uploads[*n].tensor = tensor;
     uploads[*n].data = data;
     uploads[*n].bytes = bytes;
-    uploads[*n].owned = owned;
     ++*n;
-}
-
-static void rllm_f32_upload_release(struct rllm_f32_upload *uploads, int n)
-{
-    if (!uploads) return;
-    for (int i = 0; i < n; ++i) free(uploads[i].owned);
-    free(uploads);
 }
 
 static void rllm_f32_validate_dataflow(SEXP nodes)
@@ -1775,8 +1816,20 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
     Rggml_view_3d_fun view_3d = Rggml_view_3d_ptr();
     Rfmalloc_storage_data_fun storage_data = Rfmalloc_storage_data_ptr();
 
+    /* The context is owned by its external pointer before anything is put in
+     * it: every check below can raise an R error from a helper, and an R error
+     * longjmps past local cleanup. Its finalizer releases whatever was built. */
+    SEXP owner = PROTECT(Rf_allocVector(VECSXP, use_device ? 2 : 1));
+    SET_VECTOR_ELT(owner, 0, execution);
+    if (use_device) SET_VECTOR_ELT(owner, 1, backend_context);
+    SEXP ext = PROTECT(R_MakeExternalPtr(NULL, rllm_f32_context_tag(), owner));
+    R_RegisterCFinalizerEx(ext, rllm_f32_context_finalizer, FALSE);
     struct rllm_f32_context *ctx = calloc(1, sizeof(*ctx));
-    if (!ctx) Rf_error("native F32 execution context allocation failed");
+    if (!ctx) {
+        UNPROTECT(2);
+        Rf_error("native F32 execution context allocation failed");
+    }
+    R_SetExternalPtrAddr(ext, ctx);
     ctx->backend_code = backend_code;
     ctx->own_backend = !use_device;
     ctx->channels = channels;
@@ -1791,7 +1844,6 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
         ? rllm_cuda_context_get(backend_context, tensors) : NULL;
     ctx->backend = use_device ? cuda_ctx->backend : cpu_init();
     if (!ctx->backend) {
-        rllm_f32_context_destroy(ctx);
         Rf_error(use_device ? "CUDA backend unavailable" : "CPU backend unavailable");
     }
     size_t graph_size = (size_t) n_nodes * 16 + 64;
@@ -1801,32 +1853,30 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
         metadata > SIZE_MAX - wmetadata || graph_overhead > SIZE_MAX - 4096 ||
         (metadata += wmetadata) > SIZE_MAX - (graph_overhead + 4096) ||
         wmetadata > SIZE_MAX - 4096) {
-        rllm_f32_context_destroy(ctx);
         Rf_error("native F32 graph metadata allocation overflows size_t");
     }
     metadata += graph_overhead + 4096;
     ctx->wctx = use_device ? NULL : ctx_create(wmetadata + 4096, 1);
     ctx->cctx = ctx_create(metadata, 1);
     if (!ctx->cctx || (!use_device && !ctx->wctx)) {
-        rllm_f32_context_destroy(ctx);
         Rf_error("native F32 fixed graph context creation failed");
     }
     ctx->input_host = malloc(input_bytes);
-    if (!ctx->input_host) {
-        rllm_f32_context_destroy(ctx);
-        Rf_error("native F32 input staging allocation failed");
-    }
+    if (!ctx->input_host) Rf_error("native F32 input staging allocation failed");
+    /* Scratch tables live on R's own allocation stack, so an error unwinds
+     * them; only what the context keeps is malloc'd. */
     const int max_uploads = 2 * n_nodes + 8;
-    struct rllm_f32_upload *uploads = calloc((size_t) max_uploads, sizeof(*uploads));
-    struct ggml_tensor **values = calloc((size_t) n_nodes, sizeof(*values));
-    if (!use_device) ctx->conv_plans = calloc((size_t) n_nodes, sizeof(*ctx->conv_plans));
-    if (!uploads || !values || (!use_device && !ctx->conv_plans)) {
-        free(values); rllm_f32_upload_release(uploads, max_uploads);
-        rllm_f32_context_destroy(ctx);
-        Rf_error("native F32 graph table allocation failed");
+    struct rllm_f32_upload *uploads = (struct rllm_f32_upload *)
+        R_alloc((size_t) max_uploads, sizeof(*uploads));
+    struct ggml_tensor **values = (struct ggml_tensor **)
+        R_alloc((size_t) n_nodes, sizeof(*values));
+    memset(values, 0, (size_t) n_nodes * sizeof(*values));
+    if (!use_device) {
+        ctx->conv_plans = calloc((size_t) n_nodes, sizeof(*ctx->conv_plans));
+        if (!ctx->conv_plans) Rf_error("native F32 graph table allocation failed");
     }
     int n_uploads = 0;
-#define RLLM_FX_FAIL(...) do { rllm_f32_upload_release(uploads, n_uploads); free(values); rllm_f32_context_destroy(ctx); Rf_error(__VA_ARGS__); } while (0)
+#define RLLM_FX_FAIL(...) Rf_error(__VA_ARGS__)
 #define RLLM_FX_CHECK(x) do { if (!(x)) RLLM_FX_FAIL("native F32 graph construction failed (%s)", #x); } while (0)
 
     int64_t input_ne[3] = { sequence_length, channels, batch };
@@ -1870,6 +1920,8 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
                         conv_plan_destroy(plan);
                         RLLM_FX_FAIL("native F32 packed convolution plan table overflow");
                     }
+                    /* Recorded before the graph refers to it, so the context
+                     * finalizer owns it from here on. */
                     ctx->conv_plans[ctx->n_conv_plans++] = plan;
                     values[i] = conv_plan_apply(ctx->cctx, plan, x);
                     RLLM_FX_CHECK(values[i]);
@@ -1886,7 +1938,7 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
                 ctx->cctx, GGML_TYPE_F32, 3, affine_ne, NULL);
             RLLM_FX_CHECK(bias_tensor);
             rllm_f32_upload_add(uploads, &n_uploads, max_uploads, bias_tensor,
-                                 bias, (size_t) out_channels * sizeof(*bias), NULL);
+                                 bias, (size_t) out_channels * sizeof(*bias));
             values[i] = add(ctx->cctx, values[i], bias_tensor);
             RLLM_FX_CHECK(values[i]);
         } else if (!strcmp(op, "batch_norm")) {
@@ -1909,11 +1961,10 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
                 rllm_f32_mul_size((size_t) width, sizeof(float), &affine_bytes)) {
                 RLLM_FX_FAIL("native F32 batch normalization is invalid");
             }
-            float *scale = malloc(affine_bytes), *shift = malloc(affine_bytes);
-            if (!scale || !shift) { free(scale); free(shift); RLLM_FX_FAIL("native F32 normalization allocation failed"); }
+            float *scale = (float *) R_alloc((size_t) width, sizeof(*scale));
+            float *shift = (float *) R_alloc((size_t) width, sizeof(*shift));
             for (int j = 0; j < width; ++j) {
                 if (!R_FINITE(variance[j]) || variance[j] < 0) {
-                    free(scale); free(shift);
                     RLLM_FX_FAIL("native F32 batch normalization variance is invalid");
                 }
                 scale[j] = weight[j] / sqrtf(variance[j] + (float) eps);
@@ -1922,9 +1973,9 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
             int64_t affine_ne[3] = { 1, width, 1 };
             struct ggml_tensor *scale_tensor = new_tensor(ctx->cctx, GGML_TYPE_F32, 3, affine_ne, NULL);
             struct ggml_tensor *shift_tensor = new_tensor(ctx->cctx, GGML_TYPE_F32, 3, affine_ne, NULL);
-            if (!scale_tensor || !shift_tensor) { free(scale); free(shift); RLLM_FX_FAIL("native F32 graph construction failed (normalization tensors)"); }
-            rllm_f32_upload_add(uploads, &n_uploads, max_uploads, scale_tensor, scale, affine_bytes, scale);
-            rllm_f32_upload_add(uploads, &n_uploads, max_uploads, shift_tensor, shift, affine_bytes, shift);
+            RLLM_FX_CHECK(scale_tensor && shift_tensor);
+            rllm_f32_upload_add(uploads, &n_uploads, max_uploads, scale_tensor, scale, affine_bytes);
+            rllm_f32_upload_add(uploads, &n_uploads, max_uploads, shift_tensor, shift, affine_bytes);
             values[i] = add(ctx->cctx, mul(ctx->cctx, x, scale_tensor), shift_tensor);
             RLLM_FX_CHECK(values[i]);
         } else if (!strcmp(op, "leaky_relu")) {
@@ -1985,13 +2036,6 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
     for (int i = 0; i < n_uploads; ++i) {
         tensor_set(uploads[i].tensor, uploads[i].data, 0, uploads[i].bytes);
     }
-    rllm_f32_upload_release(uploads, n_uploads);
-    free(values);
-    SEXP owner = PROTECT(Rf_allocVector(VECSXP, use_device ? 2 : 1));
-    SET_VECTOR_ELT(owner, 0, execution);
-    if (use_device) SET_VECTOR_ELT(owner, 1, backend_context);
-    SEXP ext = PROTECT(R_MakeExternalPtr(ctx, rllm_f32_context_tag(), owner));
-    R_RegisterCFinalizerEx(ext, rllm_f32_context_finalizer, FALSE);
     UNPROTECT(2);
     return ext;
 #undef RLLM_FX_CHECK

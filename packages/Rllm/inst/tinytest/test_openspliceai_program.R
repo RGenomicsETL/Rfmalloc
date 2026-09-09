@@ -136,6 +136,30 @@ expect_error(
     Rllm:::.rllm_f32_forward(bad_model, list(sequence = sequence)),
     "later or unknown input"
 )
+# A parameter reference that only a helper can reject fails deep in
+# construction, after the backend, both graph contexts, the staging buffer and
+# earlier packed convolution plans exist. The error unwinds past any local
+# cleanup, so the context has to be owned by its external pointer from the
+# start; nothing built so far may survive the failure or disturb the next call.
+late_model <- native_model
+conv_at <- which(vapply(
+    late_model$execution$program$nodes, `[[`, character(1), "op"
+) == "conv1d")
+late_model$execution$program$nodes[[
+    conv_at[[length(conv_at)]]
+]]$attributes$weight <- "not a parameter"
+for (i in 1:3) {
+    expect_error(
+        Rllm:::.rllm_f32_forward(late_model, list(sequence = sequence)),
+        "must be a parameter"
+    )
+}
+gc()
+expect_equal(
+    Rllm:::.rllm_f32_forward(native_model, list(sequence = sequence),
+                             threads = 1L)$probabilities,
+    native, tolerance = 0
+)
 expect_error(
     Rllm:::.rllm_lower_program(
         adapted, list(architecture = "openspliceai")
