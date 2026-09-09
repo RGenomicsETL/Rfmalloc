@@ -178,6 +178,8 @@ struct ggml_tensor *Rggml_conv_1d_f32_plan_apply(
     struct ggml_tensor *input);
 struct ggml_tensor *Rggml_leaky_relu(struct ggml_context *ctx,
                                       struct ggml_tensor *a, double slope);
+struct ggml_tensor *Rggml_leaky_relu_cpu(struct ggml_context *ctx,
+                                          struct ggml_tensor *a, double slope);
 struct ggml_tensor *Rggml_soft_max(struct ggml_context *ctx, struct ggml_tensor *a);
 struct ggml_tensor *Rggml_soft_max_ext(struct ggml_context *ctx,
                                        struct ggml_tensor *a,

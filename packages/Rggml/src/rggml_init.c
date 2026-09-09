@@ -11,6 +11,7 @@
 #include <R_ext/Rdynload.h>
 
 #include "rggml_api.h"
+#include "rggml_cpu_ops.h"
 
 #if defined(RGGML_SIMD_DISPATCH) && RGGML_SIMD_DISPATCH
 void rggml_simd_dispatch_init(void);
@@ -32,6 +33,8 @@ SEXP RC_rggml_test_conv1d_f32(SEXP kernel_sexp, SEXP input_sexp,
                               SEXP bias_sexp, SEXP stride_sexp,
                               SEXP padding_sexp, SEXP dilation_sexp);
 SEXP RC_rggml_test_conv1d_f32_bounds(void);
+SEXP RC_rggml_test_leaky_relu_cpu(SEXP input_sexp, SEXP slope_sexp,
+                                  SEXP threads_sexp);
 
 static const R_CallMethodDef CallEntries[] = {
     {"RC_rggml_version",           (DL_FUNC) &RC_rggml_version,           0},
@@ -46,6 +49,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"RC_rggml_bench_q4k_dot",     (DL_FUNC) &RC_rggml_bench_q4k_dot,     2},
     {"RC_rggml_test_conv1d_f32",   (DL_FUNC) &RC_rggml_test_conv1d_f32,   6},
     {"RC_rggml_test_conv1d_f32_bounds", (DL_FUNC) &RC_rggml_test_conv1d_f32_bounds, 0},
+    {"RC_rggml_test_leaky_relu_cpu", (DL_FUNC) &RC_rggml_test_leaky_relu_cpu, 3},
     {NULL, NULL, 0}
 };
 
@@ -134,6 +138,7 @@ static void register_c_callables(DllInfo *dll)
     R_RegisterCCallable("Rggml", "Rggml_conv_1d_f32_plan_destroy", (DL_FUNC) Rggml_conv_1d_f32_plan_destroy);
     R_RegisterCCallable("Rggml", "Rggml_conv_1d_f32_plan_apply", (DL_FUNC) Rggml_conv_1d_f32_plan_apply);
     R_RegisterCCallable("Rggml", "Rggml_leaky_relu",            (DL_FUNC) Rggml_leaky_relu);
+    R_RegisterCCallable("Rggml", "Rggml_leaky_relu_cpu",        (DL_FUNC) Rggml_leaky_relu_cpu);
     R_RegisterCCallable("Rggml", "Rggml_soft_max",              (DL_FUNC) Rggml_soft_max);
     R_RegisterCCallable("Rggml", "Rggml_soft_max_ext",          (DL_FUNC) Rggml_soft_max_ext);
     R_RegisterCCallable("Rggml", "Rggml_diag_mask_inf",         (DL_FUNC) Rggml_diag_mask_inf);

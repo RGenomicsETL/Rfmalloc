@@ -8,10 +8,20 @@
 #include "rggml_conv1d.h"
 
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define RGGML_CONV1D_F32_MAX_OC 65536
+
+/* Shared claim state for one plan. GGML barriers every node, so exactly the
+ * threads of one invocation are inside the callback at a time; the thread that
+ * completes last restores both counters for the next invocation. That keeps
+ * the scheme correct when the thread count changes between calls. */
+struct rggml_conv1d_sync {
+    _Atomic int_fast64_t next;
+    _Atomic int_fast64_t done;
+};
 
 static int
 rggml_conv1d_mul(size_t a, size_t b, size_t *out)
@@ -46,6 +56,7 @@ Rggml_conv_1d_f32_plan_create(const float *kernel, size_t kernel_bytes,
 {
     size_t weights, weight_bytes, bias_bytes_required;
     struct Rggml_conv_1d_f32_plan *plan;
+    int64_t positions, rows;
 
     if (!kernel || kernel_size < 1 || input_channels < 1 ||
         output_channels < 1 || stride < 1 || padding < 0 || dilation < 1 ||
@@ -66,13 +77,17 @@ Rggml_conv_1d_f32_plan_create(const float *kernel, size_t kernel_bytes,
     plan = calloc(1, sizeof(*plan));
     if (!plan) return NULL;
     plan->packed = malloc(weight_bytes);
-    if (!plan->packed) {
+    plan->sync = calloc(1, sizeof(*plan->sync));
+    if (!plan->packed || !plan->sync) {
+        free(plan->sync);
+        free(plan->packed);
         free(plan);
         return NULL;
     }
     if (bias) {
         plan->bias = malloc(bias_bytes_required);
         if (!plan->bias) {
+            free(plan->sync);
             free(plan->packed);
             free(plan);
             return NULL;
@@ -87,8 +102,19 @@ Rggml_conv_1d_f32_plan_create(const float *kernel, size_t kernel_bytes,
     plan->padding = padding;
     plan->dilation = dilation;
 
-    /* GGUF/GGML source layout is [K, IC, OC], K contiguous. The packed
-     * layout makes every one input scalar update a contiguous OC block. */
+    /* A work item gathers `tile_rows` consecutive (tap, input channel) rows
+     * for `tile_positions` output positions. Both are chosen so one tile fits
+     * the bounded stack buffer, and a deep kernel is accumulated in passes. */
+    positions = RGGML_CONV1D_TILE_POSITIONS;
+    if (positions > RGGML_CONV1D_TILE_MAX_FLOATS) positions = RGGML_CONV1D_TILE_MAX_FLOATS;
+    rows = RGGML_CONV1D_TILE_MAX_FLOATS / positions;
+    if (rows > kernel_size * input_channels) rows = kernel_size * input_channels;
+    if (rows < 1) rows = 1;
+    plan->tile_positions = positions;
+    plan->tile_rows = rows;
+
+    /* GGUF/GGML source layout is [K, IC, OC], K contiguous. The packed layout
+     * makes one (tap, input channel) row address a contiguous OC block. */
     for (int64_t tap = 0; tap < kernel_size; ++tap) {
         for (int64_t channel = 0; channel < input_channels; ++channel) {
             float *to = plan->packed +
@@ -106,36 +132,94 @@ void
 Rggml_conv_1d_f32_plan_destroy(struct Rggml_conv_1d_f32_plan *plan)
 {
     if (!plan) return;
+    free(plan->sync);
     free(plan->bias);
     free(plan->packed);
     free(plan);
 }
 
 void
-rggml_conv1d_f32_accumulate_scalar(float *dst, const struct ggml_tensor *input,
-    const struct Rggml_conv_1d_f32_plan *plan, int64_t batch,
-    int64_t output_position)
+rggml_conv1d_f32_tile_scalar(float *dst, int64_t dst_stride, const float *tile,
+    const float *weights, int64_t rows, int64_t positions,
+    int64_t output_channels)
 {
-    const int64_t input_length = input->ne[0];
-    const char *base = (const char *) input->data;
-    const size_t output_channels = (size_t) plan->output_channels;
-
-    for (int64_t output = 0; output < plan->output_channels; ++output) {
-        dst[output] = plan->bias ? plan->bias[output] : 0.0f;
+    for (int64_t row = 0; row < rows; ++row) {
+        const float *x = tile + row * positions;
+        const float *w = weights + row * output_channels;
+        for (int64_t oc = 0; oc < output_channels; ++oc) {
+            float *out = dst + oc * dst_stride;
+            const float weight = w[oc];
+            for (int64_t p = 0; p < positions; ++p) out[p] += weight * x[p];
+        }
     }
-    for (int64_t tap = 0; tap < plan->kernel; ++tap) {
-        const int64_t position = output_position * plan->stride +
-            tap * plan->dilation - plan->padding;
-        if (position < 0 || position >= input_length) continue;
-        for (int64_t channel = 0; channel < plan->input_channels; ++channel) {
-            const float value = *(const float *) (base +
-                (size_t) position * input->nb[0] +
-                (size_t) channel * input->nb[1] + (size_t) batch * input->nb[2]);
-            const float *weight = plan->packed +
-                ((size_t) tap * plan->input_channels + (size_t) channel) * output_channels;
-            for (int64_t output = 0; output < plan->output_channels; ++output) {
-                dst[output] += value * weight[output];
-            }
+}
+
+/* Gather rows [row0, row0 + rows) of the (tap, input channel) space for one
+ * batch element and `positions` output positions starting at `first`. Taps
+ * that fall outside the padded input contribute zero. */
+static void
+rggml_conv1d_f32_gather(float *tile, const struct ggml_tensor *input,
+    const struct Rggml_conv_1d_f32_plan *plan, int64_t batch, int64_t first,
+    int64_t positions, int64_t row0, int64_t rows)
+{
+    const int64_t length = input->ne[0];
+    const int64_t channels = plan->input_channels;
+    const char *base = (const char *) input->data + (size_t) batch * input->nb[2];
+    const int contiguous = plan->stride == 1 && input->nb[0] == sizeof(float);
+
+    for (int64_t row = 0; row < rows; ++row) {
+        const int64_t tap = (row0 + row) / channels;
+        const int64_t channel = (row0 + row) % channels;
+        const char *source = base + (size_t) channel * input->nb[1];
+        float *out = tile + row * positions;
+        const int64_t start = first * plan->stride + tap * plan->dilation -
+            plan->padding;
+
+        if (contiguous && start >= 0 && start + positions <= length) {
+            memcpy(out, source + (size_t) start * sizeof(float),
+                   (size_t) positions * sizeof(float));
+            continue;
+        }
+        for (int64_t p = 0; p < positions; ++p) {
+            const int64_t at = start + p * plan->stride;
+            out[p] = (at >= 0 && at < length)
+                ? *(const float *) (source + (size_t) at * input->nb[0])
+                : 0.0f;
+        }
+    }
+}
+
+static void
+rggml_conv1d_f32_item(struct ggml_tensor *dst, const struct ggml_tensor *input,
+    const struct Rggml_conv_1d_f32_plan *plan, int64_t item, int64_t blocks)
+{
+    float tile[RGGML_CONV1D_TILE_MAX_FLOATS];
+    const int64_t nout = dst->ne[0];
+    const int64_t channels = dst->ne[1];
+    const int64_t batch = item / blocks;
+    const int64_t first = (item - batch * blocks) * plan->tile_positions;
+    const int64_t positions = plan->tile_positions < nout - first
+        ? plan->tile_positions : nout - first;
+    const int64_t stride = (int64_t) (dst->nb[1] / sizeof(float));
+    const int64_t rows = plan->kernel * plan->input_channels;
+    float *out = (float *) ((char *) dst->data + (size_t) batch * dst->nb[2]) + first;
+
+    for (int64_t oc = 0; oc < channels; ++oc) {
+        float *row = out + oc * stride;
+        const float value = plan->bias ? plan->bias[oc] : 0.0f;
+        for (int64_t p = 0; p < positions; ++p) row[p] = value;
+    }
+    for (int64_t row0 = 0; row0 < rows; row0 += plan->tile_rows) {
+        const int64_t take = plan->tile_rows < rows - row0
+            ? plan->tile_rows : rows - row0;
+        rggml_conv1d_f32_gather(tile, input, plan, batch, first, positions,
+                                row0, take);
+        if (plan->scalar_only) {
+            rggml_conv1d_f32_tile_scalar(out, stride, tile,
+                plan->packed + row0 * channels, take, positions, channels);
+        } else {
+            rggml_conv1d_f32_tile(out, stride, tile,
+                plan->packed + row0 * channels, take, positions, channels);
         }
     }
 }
@@ -146,15 +230,29 @@ rggml_conv1d_f32_callback(struct ggml_tensor *dst, int ith, int nth,
 {
     const struct Rggml_conv_1d_f32_plan *plan = userdata;
     const struct ggml_tensor *input = dst->src[0];
-    const int64_t output_length = dst->ne[1];
-    const int64_t rows = dst->ne[1] * dst->ne[2];
-    float *data = (float *) dst->data;
+    const int64_t blocks = (dst->ne[0] + plan->tile_positions - 1) /
+        plan->tile_positions;
+    const int64_t total = blocks * dst->ne[2];
 
-    for (int64_t row = ith; row < rows; row += nth) {
-        const int64_t batch = row / output_length;
-        const int64_t position = row - batch * output_length;
-        rggml_conv1d_f32_accumulate(data + (size_t) row * plan->output_channels,
-                              input, plan, batch, position);
+    if (nth < 2 || !plan->sync) {
+        for (int64_t item = ith; item < total; item += nth) {
+            rggml_conv1d_f32_item(dst, input, plan, item, blocks);
+        }
+        return;
+    }
+    /* Performance cores retire this kernel about twice as fast as efficiency
+     * cores, so a static split would leave every node waiting on the slowest
+     * thread. Items are claimed instead, and the last thread out restores the
+     * counters behind GGML's own end-of-node barrier. */
+    for (;;) {
+        const int_fast64_t item = atomic_fetch_add_explicit(&plan->sync->next, 1,
+                                                            memory_order_relaxed);
+        if (item >= total) break;
+        rggml_conv1d_f32_item(dst, input, plan, (int64_t) item, blocks);
+    }
+    if (atomic_fetch_add_explicit(&plan->sync->done, 1, memory_order_acq_rel) + 1 == nth) {
+        atomic_store_explicit(&plan->sync->next, 0, memory_order_relaxed);
+        atomic_store_explicit(&plan->sync->done, 0, memory_order_release);
     }
 }
 
@@ -164,7 +262,6 @@ Rggml_conv_1d_f32_plan_apply(struct ggml_context *ctx,
 {
     int64_t output_length;
     struct ggml_tensor *args[1];
-    struct ggml_tensor *packed_output;
 
     if (!ctx || !plan || !input || input->type != GGML_TYPE_F32 ||
         input->ne[3] != 1 || input->ne[0] < 1 ||
@@ -182,9 +279,9 @@ Rggml_conv_1d_f32_plan_apply(struct ggml_context *ctx,
         return NULL;
     }
     args[0] = input;
-    packed_output = ggml_custom_4d(ctx, GGML_TYPE_F32, plan->output_channels,
-        output_length, input->ne[2], 1, args, 1, rggml_conv1d_f32_callback,
-        GGML_N_TASKS_MAX, (void *) plan);
-    if (!packed_output) return NULL;
-    return ggml_cont(ctx, ggml_permute(ctx, packed_output, 1, 0, 2, 3));
+    /* The kernel writes the AST layout directly, so no permutation or
+     * materializing copy follows the convolution. */
+    return ggml_custom_4d(ctx, GGML_TYPE_F32, output_length,
+        plan->output_channels, input->ne[2], 1, args, 1,
+        rggml_conv1d_f32_callback, GGML_N_TASKS_MAX, (void *) plan);
 }

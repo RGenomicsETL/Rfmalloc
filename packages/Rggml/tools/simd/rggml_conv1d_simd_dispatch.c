@@ -1,5 +1,5 @@
 /*
- * Runtime dispatch for project-owned packed F32 conv1d rows.
+ * Runtime dispatch for project-owned packed F32 conv1d tiles.
  *
  * Copyright (C) 2026 Sounkou Mahamane Toure
  *
@@ -9,9 +9,9 @@
 #include "../../src/rggml_conv1d.h"
 
 #ifdef RGGML_HAVE_X86_AVX2
-extern void rggml_conv1d_f32_accumulate_avx2(float *dst,
-    const struct ggml_tensor *input, const struct Rggml_conv_1d_f32_plan *plan,
-    int64_t batch, int64_t output_position);
+extern void rggml_conv1d_f32_tile_avx2(float *dst, int64_t dst_stride,
+    const float *tile, const float *weights, int64_t rows, int64_t positions,
+    int64_t output_channels);
 static int rggml_conv1d_use_avx2;
 #endif
 
@@ -24,15 +24,17 @@ rggml_conv1d_simd_dispatch_init(void)
 }
 
 void
-rggml_conv1d_f32_accumulate(float *dst, const struct ggml_tensor *input,
-    const struct Rggml_conv_1d_f32_plan *plan, int64_t batch,
-    int64_t output_position)
+rggml_conv1d_f32_tile(float *dst, int64_t dst_stride, const float *tile,
+    const float *weights, int64_t rows, int64_t positions,
+    int64_t output_channels)
 {
 #ifdef RGGML_HAVE_X86_AVX2
-    if (!plan->scalar_only && rggml_conv1d_use_avx2) {
-        rggml_conv1d_f32_accumulate_avx2(dst, input, plan, batch, output_position);
+    if (rggml_conv1d_use_avx2) {
+        rggml_conv1d_f32_tile_avx2(dst, dst_stride, tile, weights, rows,
+                                   positions, output_channels);
         return;
     }
 #endif
-    rggml_conv1d_f32_accumulate_scalar(dst, input, plan, batch, output_position);
+    rggml_conv1d_f32_tile_scalar(dst, dst_stride, tile, weights, rows,
+                                 positions, output_channels);
 }

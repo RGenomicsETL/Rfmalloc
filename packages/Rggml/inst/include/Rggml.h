@@ -259,6 +259,14 @@ typedef struct ggml_tensor *(*Rggml_conv_1d_f32_plan_apply_fun)(
 typedef struct ggml_tensor *(*Rggml_leaky_relu_fun)(struct ggml_context *ctx,
                                                      struct ggml_tensor *a,
                                                      double slope);
+/* Leaky ReLU spread over every CPU worker. Upstream GGML computes this
+ * operator on thread zero alone, which stalls every other worker at the next
+ * barrier. Returns NULL when the input is not a contiguous F32 tensor, and a
+ * device graph must keep the official operator because a custom CPU callback
+ * is not a device operation. */
+typedef struct ggml_tensor *(*Rggml_leaky_relu_cpu_fun)(struct ggml_context *ctx,
+                                                         struct ggml_tensor *a,
+                                                         double slope);
 typedef struct ggml_tensor *(*Rggml_soft_max_fun)(struct ggml_context *ctx,
                                                    struct ggml_tensor *a);
 typedef struct ggml_tensor *(*Rggml_soft_max_ext_fun)(struct ggml_context *ctx,
@@ -598,6 +606,12 @@ static inline Rggml_leaky_relu_fun Rggml_leaky_relu_ptr(void)
 {
     return (Rggml_leaky_relu_fun)
         R_GetCCallable("Rggml", "Rggml_leaky_relu");
+}
+
+static inline Rggml_leaky_relu_cpu_fun Rggml_leaky_relu_cpu_ptr(void)
+{
+    return (Rggml_leaky_relu_cpu_fun)
+        R_GetCCallable("Rggml", "Rggml_leaky_relu_cpu");
 }
 
 static inline Rggml_soft_max_fun Rggml_soft_max_ptr(void)

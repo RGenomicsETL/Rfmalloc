@@ -1,5 +1,5 @@
 /*
- * AVX2/FMA implementation for project-owned packed F32 conv1d rows.
+ * AVX2/FMA implementation for project-owned packed F32 conv1d tiles.
  *
  * Copyright (C) 2026 Sounkou Mahamane Toure
  *
@@ -9,39 +9,110 @@
 
 #include "../../src/rggml_conv1d.h"
 
-void
-rggml_conv1d_f32_accumulate_avx2(float *dst, const struct ggml_tensor *input,
-    const struct Rggml_conv_1d_f32_plan *plan, int64_t batch,
-    int64_t output_position)
+/* The hot shape: four output channels by three position vectors keeps twelve
+ * accumulators, three input vectors and one broadcast live, which is exactly
+ * the sixteen YMM registers. Each gathered input vector then feeds four fused
+ * multiply-adds instead of one, so the loop stops being load-bound. */
+static inline void
+rggml_conv1d_avx2_block24x4(float *dst, int64_t dst_stride, const float *tile,
+    const float *weights, int64_t rows, int64_t positions,
+    int64_t output_channels, int64_t p0, int64_t oc0)
 {
-    const int64_t input_length = input->ne[0];
-    const char *base = (const char *) input->data;
-    const size_t output_channels = (size_t) plan->output_channels;
-    const int64_t vector_end = plan->output_channels & ~INT64_C(7);
+    float *out0 = dst + oc0 * dst_stride + p0;
+    float *out1 = out0 + dst_stride;
+    float *out2 = out1 + dst_stride;
+    float *out3 = out2 + dst_stride;
+    __m256 a00 = _mm256_loadu_ps(out0), a01 = _mm256_loadu_ps(out0 + 8), a02 = _mm256_loadu_ps(out0 + 16);
+    __m256 a10 = _mm256_loadu_ps(out1), a11 = _mm256_loadu_ps(out1 + 8), a12 = _mm256_loadu_ps(out1 + 16);
+    __m256 a20 = _mm256_loadu_ps(out2), a21 = _mm256_loadu_ps(out2 + 8), a22 = _mm256_loadu_ps(out2 + 16);
+    __m256 a30 = _mm256_loadu_ps(out3), a31 = _mm256_loadu_ps(out3 + 8), a32 = _mm256_loadu_ps(out3 + 16);
 
-    for (int64_t output = 0; output < plan->output_channels; ++output) {
-        dst[output] = plan->bias ? plan->bias[output] : 0.0f;
+    for (int64_t row = 0; row < rows; ++row) {
+        const float *x = tile + row * positions + p0;
+        const float *w = weights + row * output_channels + oc0;
+        const __m256 x0 = _mm256_loadu_ps(x);
+        const __m256 x1 = _mm256_loadu_ps(x + 8);
+        const __m256 x2 = _mm256_loadu_ps(x + 16);
+        __m256 wb = _mm256_broadcast_ss(w);
+        a00 = _mm256_fmadd_ps(x0, wb, a00);
+        a01 = _mm256_fmadd_ps(x1, wb, a01);
+        a02 = _mm256_fmadd_ps(x2, wb, a02);
+        wb = _mm256_broadcast_ss(w + 1);
+        a10 = _mm256_fmadd_ps(x0, wb, a10);
+        a11 = _mm256_fmadd_ps(x1, wb, a11);
+        a12 = _mm256_fmadd_ps(x2, wb, a12);
+        wb = _mm256_broadcast_ss(w + 2);
+        a20 = _mm256_fmadd_ps(x0, wb, a20);
+        a21 = _mm256_fmadd_ps(x1, wb, a21);
+        a22 = _mm256_fmadd_ps(x2, wb, a22);
+        wb = _mm256_broadcast_ss(w + 3);
+        a30 = _mm256_fmadd_ps(x0, wb, a30);
+        a31 = _mm256_fmadd_ps(x1, wb, a31);
+        a32 = _mm256_fmadd_ps(x2, wb, a32);
     }
-    for (int64_t tap = 0; tap < plan->kernel; ++tap) {
-        const int64_t position = output_position * plan->stride +
-            tap * plan->dilation - plan->padding;
-        if (position < 0 || position >= input_length) continue;
-        for (int64_t channel = 0; channel < plan->input_channels; ++channel) {
-            const float value = *(const float *) (base +
-                (size_t) position * input->nb[0] +
-                (size_t) channel * input->nb[1] + (size_t) batch * input->nb[2]);
-            const float *weight = plan->packed +
-                ((size_t) tap * plan->input_channels + (size_t) channel) * output_channels;
-            const __m256 input_vector = _mm256_set1_ps(value);
-            int64_t output = 0;
-            for (; output < vector_end; output += 8) {
-                const __m256 previous = _mm256_loadu_ps(dst + output);
-                const __m256 weights = _mm256_loadu_ps(weight + output);
-                _mm256_storeu_ps(dst + output,
-                    _mm256_fmadd_ps(input_vector, weights, previous));
+    _mm256_storeu_ps(out0, a00); _mm256_storeu_ps(out0 + 8, a01); _mm256_storeu_ps(out0 + 16, a02);
+    _mm256_storeu_ps(out1, a10); _mm256_storeu_ps(out1 + 8, a11); _mm256_storeu_ps(out1 + 16, a12);
+    _mm256_storeu_ps(out2, a20); _mm256_storeu_ps(out2 + 8, a21); _mm256_storeu_ps(out2 + 16, a22);
+    _mm256_storeu_ps(out3, a30); _mm256_storeu_ps(out3 + 8, a31); _mm256_storeu_ps(out3 + 16, a32);
+}
+
+/* One eight-position vector against up to four output channels: the remainder
+ * of a position block, and every block of a short output. */
+static inline void
+rggml_conv1d_avx2_block8(float *dst, int64_t dst_stride, const float *tile,
+    const float *weights, int64_t rows, int64_t positions,
+    int64_t output_channels, int64_t p0, int64_t oc0, int64_t channels)
+{
+    float *out[4];
+    __m256 acc[4];
+
+    for (int64_t j = 0; j < channels; ++j) {
+        out[j] = dst + (oc0 + j) * dst_stride + p0;
+        acc[j] = _mm256_loadu_ps(out[j]);
+    }
+    for (int64_t row = 0; row < rows; ++row) {
+        const __m256 x = _mm256_loadu_ps(tile + row * positions + p0);
+        const float *w = weights + row * output_channels + oc0;
+        for (int64_t j = 0; j < channels; ++j) {
+            acc[j] = _mm256_fmadd_ps(x, _mm256_broadcast_ss(w + j), acc[j]);
+        }
+    }
+    for (int64_t j = 0; j < channels; ++j) _mm256_storeu_ps(out[j], acc[j]);
+}
+
+void
+rggml_conv1d_f32_tile_avx2(float *dst, int64_t dst_stride, const float *tile,
+    const float *weights, int64_t rows, int64_t positions,
+    int64_t output_channels)
+{
+    const int64_t vector_end = positions & ~INT64_C(7);
+
+    for (int64_t oc0 = 0; oc0 < output_channels; oc0 += 4) {
+        const int64_t channels = output_channels - oc0 < 4
+            ? output_channels - oc0 : 4;
+        int64_t p0 = 0;
+
+        if (channels == 4) {
+            for (; p0 + 24 <= vector_end; p0 += 24) {
+                rggml_conv1d_avx2_block24x4(dst, dst_stride, tile, weights, rows,
+                                            positions, output_channels, p0, oc0);
             }
-            for (; output < plan->output_channels; ++output) {
-                dst[output] += value * weight[output];
+        }
+        for (; p0 + 8 <= vector_end; p0 += 8) {
+            rggml_conv1d_avx2_block8(dst, dst_stride, tile, weights, rows,
+                                     positions, output_channels, p0, oc0, channels);
+        }
+        if (p0 < positions) {
+            /* Fewer than eight positions are left: the portable form is both
+             * correct and short enough not to matter. */
+            for (int64_t row = 0; row < rows; ++row) {
+                const float *x = tile + row * positions;
+                const float *w = weights + row * output_channels + oc0;
+                for (int64_t j = 0; j < channels; ++j) {
+                    float *out = dst + (oc0 + j) * dst_stride;
+                    const float weight = w[j];
+                    for (int64_t p = p0; p < positions; ++p) out[p] += weight * x[p];
+                }
             }
         }
     }

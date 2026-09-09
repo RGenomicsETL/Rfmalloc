@@ -1,5 +1,23 @@
 # Rggml 0.1.0 (unreleased)
 
+- Rewrote the packed F32 conv1d kernel around output tiles. A work item now
+  gathers its own `[tap * channel][position]` tile, so padding, stride and
+  dilation leave the inner loop, and the AVX2 form keeps twelve accumulators,
+  three input vectors and one broadcast live, which turns one fused
+  multiply-add per weight load into four. The plan writes the AST layout
+  directly, so the permutation and the materializing copy that followed every
+  convolution are gone. Workers claim tiles from a shared counter instead of
+  taking a fixed share, because performance cores retire this kernel about
+  twice as fast as efficiency cores and a static split left every node waiting
+  on the slowest thread.
+
+- Added `Rggml_leaky_relu_cpu()`, a leaky ReLU spread over every CPU worker.
+  Upstream GGML computes that operator on thread zero alone, which stalled
+  every other worker at the next barrier for the whole of it. The new operator
+  is bit-identical to the official one at any thread count; device graphs keep
+  the official operator because a custom CPU callback is not a device
+  operation.
+
 - Added a generic persistent packed F32 conv1d CPU C-callable plan. It copies
   validated `[K, IC, OC]` weights and optional bias once, stores output-channel
   blocks contiguously, and builds a CPU-only custom graph operation with scalar

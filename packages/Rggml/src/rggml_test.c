@@ -845,6 +845,98 @@ done:
     return status;
 }
 
+/* Differential proof for the worker-split leaky ReLU. Upstream computes the
+ * operator on thread zero alone; this runs both forms in one graph, at a
+ * caller-chosen thread count, and hands both results back for comparison. */
+SEXP
+RC_rggml_test_leaky_relu_cpu(SEXP input_sexp, SEXP slope_sexp, SEXP threads_sexp)
+{
+    Rggml_context_create_fun context_create = Rggml_context_create_ptr();
+    Rggml_context_free_fun context_free = Rggml_context_free_ptr();
+    Rggml_tensor_overhead_fun tensor_overhead = Rggml_tensor_overhead_ptr();
+    Rggml_graph_overhead_fun graph_overhead = Rggml_graph_overhead_ptr();
+    Rggml_new_tensor_fun new_tensor = Rggml_new_tensor_ptr();
+    Rggml_new_graph_fun new_graph = Rggml_new_graph_ptr();
+    Rggml_build_forward_expand_fun expand = Rggml_build_forward_expand_ptr();
+    Rggml_backend_alloc_ctx_tensors_fun alloc = Rggml_backend_alloc_ctx_tensors_ptr();
+    Rggml_backend_buffer_free_fun buffer_free = Rggml_backend_buffer_free_ptr();
+    Rggml_backend_tensor_set_fun tensor_set = Rggml_backend_tensor_set_ptr();
+    Rggml_backend_tensor_get_fun tensor_get = Rggml_backend_tensor_get_ptr();
+    Rggml_backend_cpu_init_fun cpu_init = Rggml_backend_cpu_init_ptr();
+    Rggml_backend_cpu_set_n_threads_fun set_threads = Rggml_backend_cpu_set_n_threads_ptr();
+    Rggml_backend_free_fun backend_free = Rggml_backend_free_ptr();
+    Rggml_backend_graph_compute_fun compute = Rggml_backend_graph_compute_ptr();
+    Rggml_leaky_relu_fun official = Rggml_leaky_relu_ptr();
+    Rggml_leaky_relu_cpu_fun parallel = Rggml_leaky_relu_cpu_ptr();
+    SEXP dim = Rf_getAttrib(input_sexp, R_DimSymbol);
+    const double slope = Rf_asReal(slope_sexp);
+    const int threads = Rf_asInteger(threads_sexp);
+    struct ggml_context *ctx = NULL;
+    ggml_backend_t backend = NULL;
+    ggml_backend_buffer_t buffer = NULL;
+    struct ggml_tensor *x, *a, *b;
+    struct ggml_cgraph *graph;
+    int64_t ne[3];
+    R_xlen_t n;
+    float *staging;
+    SEXP out = R_NilValue;
+
+    if (TYPEOF(input_sexp) != REALSXP || TYPEOF(dim) != INTSXP ||
+        XLENGTH(dim) != 3 || threads == NA_INTEGER || threads < 1 ||
+        !R_FINITE(slope)) {
+        Rf_error("leaky relu test needs a numeric rank-three array, one finite slope, and a thread count");
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (INTEGER(dim)[i] < 1) Rf_error("leaky relu test dimensions are invalid");
+        ne[i] = INTEGER(dim)[i];
+    }
+    n = XLENGTH(input_sexp);
+    ctx = context_create(16 * tensor_overhead() + graph_overhead(16) + 4096, 1);
+    backend = cpu_init();
+    if (!ctx || !backend) {
+        if (backend) backend_free(backend);
+        if (ctx) context_free(ctx);
+        Rf_error("leaky relu test context or backend creation failed");
+    }
+    set_threads(backend, threads);
+    staging = (float *) R_alloc((size_t) n, sizeof(*staging));
+    for (R_xlen_t i = 0; i < n; ++i) staging[i] = (float) REAL(input_sexp)[i];
+    x = new_tensor(ctx, GGML_TYPE_F32, 3, ne, NULL);
+    a = x ? official(ctx, x, slope) : NULL;
+    b = x ? parallel(ctx, x, slope) : NULL;
+    graph = a && b ? new_graph(ctx, 16) : NULL;
+    if (graph) {
+        expand(graph, a);
+        expand(graph, b);
+        buffer = alloc(ctx, backend);
+    }
+    if (buffer) {
+        tensor_set(x, staging, 0, (size_t) n * sizeof(float));
+        if (compute(backend, graph) == 0) {
+            SEXP official_out = PROTECT(Rf_allocVector(REALSXP, n));
+            SEXP parallel_out = PROTECT(Rf_allocVector(REALSXP, n));
+            float *values = (float *) R_alloc((size_t) n, sizeof(*values));
+            tensor_get(a, values, 0, (size_t) n * sizeof(float));
+            for (R_xlen_t i = 0; i < n; ++i) REAL(official_out)[i] = values[i];
+            tensor_get(b, values, 0, (size_t) n * sizeof(float));
+            for (R_xlen_t i = 0; i < n; ++i) REAL(parallel_out)[i] = values[i];
+            out = PROTECT(Rf_allocVector(VECSXP, 2));
+            SET_VECTOR_ELT(out, 0, official_out);
+            SET_VECTOR_ELT(out, 1, parallel_out);
+            SEXP names = PROTECT(Rf_allocVector(STRSXP, 2));
+            SET_STRING_ELT(names, 0, Rf_mkChar("official"));
+            SET_STRING_ELT(names, 1, Rf_mkChar("parallel"));
+            Rf_setAttrib(out, R_NamesSymbol, names);
+            UNPROTECT(4);
+        }
+    }
+    if (buffer) buffer_free(buffer);
+    backend_free(backend);
+    context_free(ctx);
+    if (out == R_NilValue) Rf_error("leaky relu differential graph failed");
+    return out;
+}
+
 SEXP
 RC_rggml_test_conv1d_f32(SEXP kernel_sexp, SEXP input_sexp, SEXP bias_sexp,
                          SEXP stride_sexp, SEXP padding_sexp, SEXP dilation_sexp)

@@ -1810,6 +1810,7 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
     Rggml_conv_1d_f32_plan_destroy_fun conv_plan_destroy =
         Rggml_conv_1d_f32_plan_destroy_ptr();
     Rggml_leaky_relu_fun leaky_relu = Rggml_leaky_relu_ptr();
+    Rggml_leaky_relu_cpu_fun leaky_relu_cpu = Rggml_leaky_relu_cpu_ptr();
     Rggml_soft_max_fun soft_max = Rggml_soft_max_ptr();
     Rggml_permute_fun permute = Rggml_permute_ptr();
     Rggml_cont_fun cont = Rggml_cont_ptr();
@@ -1979,8 +1980,13 @@ static SEXP rllm_f32_context_build(SEXP execution, int channels,
             values[i] = add(ctx->cctx, mul(ctx->cctx, x, scale_tensor), shift_tensor);
             RLLM_FX_CHECK(values[i]);
         } else if (!strcmp(op, "leaky_relu")) {
-            values[i] = leaky_relu(ctx->cctx,
-                rllm_f32_source(values, nodes, i, node, 0), rllm_number(attributes, "slope"));
+            struct ggml_tensor *x = rllm_f32_source(values, nodes, i, node, 0);
+            const double slope = rllm_number(attributes, "slope");
+            /* Upstream computes this operator on thread zero alone, so a CPU
+             * graph uses the worker-split variant and only falls back to the
+             * official operator when it declines the tensor. */
+            values[i] = use_device ? NULL : leaky_relu_cpu(ctx->cctx, x, slope);
+            if (!values[i]) values[i] = leaky_relu(ctx->cctx, x, slope);
             RLLM_FX_CHECK(values[i]);
         } else if (!strcmp(op, "add")) {
             SEXP refs = rllm_list_elt(node, "inputs");
