@@ -9,6 +9,7 @@
 <url><loc>https://sounkou-bioinfo.github.io/Rfmalloc/Rggml/reference/index.html</loc></url>
 <url><loc>https://sounkou-bioinfo.github.io/Rfmalloc/Rggml/reference/rggml_cpu_info.html</loc></url>
 <url><loc>https://sounkou-bioinfo.github.io/Rfmalloc/Rggml/reference/rggml_cuda_info.html</loc></url>
+<url><loc>https://sounkou-bioinfo.github.io/Rfmalloc/Rggml/reference/rggml_cuda_tf32.html</loc></url>
 <url><loc>https://sounkou-bioinfo.github.io/Rfmalloc/Rggml/reference/rggml_mul_mat.html</loc></url>
 <url><loc>https://sounkou-bioinfo.github.io/Rfmalloc/Rggml/reference/rggml_test_mul_mat.html</loc></url>
 <url><loc>https://sounkou-bioinfo.github.io/Rfmalloc/Rggml/reference/rggml_test_mul_mat_q4k.html</loc></url>
