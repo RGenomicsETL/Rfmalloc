@@ -2,6 +2,16 @@
 
 ## Rllm 0.1.0 (unreleased)
 
+- The native F32 lowering’s CUDA branch ran on real hardware for the
+  first time. On the RTX 5050 rig (driver 595.95, CUDA 13.2, `sm_120a`)
+  it borrows the model-owned weight backend, keeps the official im2col
+  composition, and reuses its retained device context across calls.
+  Against the CPU path the real OpenSpliceAI 80 nt and 400 nt
+  checkpoints agree to 1.0e-6 and 1.2e-7 with `NVIDIA_TF32_OVERRIDE=0`;
+  cuBLAS’s default TF32 tensor cores widen that to 7.3e-4, which Rggml’s
+  README now documents. The device reached 16,678 samples/s at batch 256
+  on the 80 nt model against that laptop CPU’s 7,004.
+
 - The native F32 CPU lowering folds a batch normalization and a leaky
   rectification into the convolution that is their only reader, so an
   OpenSpliceAI residual block emits two nodes where it used to emit
