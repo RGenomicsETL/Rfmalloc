@@ -2,6 +2,18 @@
 
 ## Rllm 0.1.0 (unreleased)
 
+- Added an internal fixed-shape F32 dataflow lowering for bound programs
+  whose single input is a named `[channel, sequence, batch]` array. It
+  retains one CPU backend, its graph context, backend buffer and input
+  and output staging across calls, and packs each generic convolution’s
+  validated `[K, IC, OC]` F32 weights once into Rggml’s direct CPU plan;
+  CUDA keeps the official im2col composition because a custom CPU
+  callback is not a CUDA operation. The real MANE 80 nt OpenSpliceAI
+  rs10 checkpoint stays within 5e-7 of both the dense R oracle and
+  upstream PyTorch. On an i5-13500 at 14 threads and batch 128 it
+  reaches 2,018.3 samples/s, 2.68 times the prior persistent CPU path
+  but 24.2% of upstream PyTorch, so it remains unexported.
+
 - Native inference now consumes a bound `rllm_program`: the serializable
   AST, its typed GGUF parameter bindings and its validated GGML lowering
   travel as one object. Forward execution, embedding, CUDA upload and

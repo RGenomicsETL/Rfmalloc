@@ -2,6 +2,13 @@
 
 ## Rggml 0.1.0 (unreleased)
 
+- Added a generic persistent packed F32 conv1d CPU C-callable plan. It
+  copies validated `[K, IC, OC]` weights and optional bias once, stores
+  output-channel blocks contiguously, and builds a CPU-only custom graph
+  operation with scalar fallback plus runtime-gated x86 AVX2/FMA. CUDA
+  retains the official F32 im2col/matrix-product graph. Added leaky ReLU
+  and CPU thread control C-callables for bound dataflow programs.
+
 - Fixed webR and Apple Silicon portability. wasm builds use GGML’s
   official SIMD128 quant kernels and omit the incompatible Fortran BLAS
   bridge; dense products continue through the CPU backend. Target-macro
