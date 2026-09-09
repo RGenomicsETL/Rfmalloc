@@ -19,5 +19,9 @@ OBJECTS = statgen_glue.o \
           pcaone/Utils.o
 
 # R's default rules do not track header dependencies, so an incremental install
-# after a header-only change links stale objects and still reports success.
+# after a header-only change links stale objects and still reports success. The
+# all: target must come first, or this rule becomes make's default goal and the
+# shared library is never linked.
+all: $(SHLIB)
+
 $(OBJECTS): $(wildcard *.h)
