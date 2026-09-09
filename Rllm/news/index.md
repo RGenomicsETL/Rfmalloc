@@ -2,6 +2,15 @@
 
 ## Rllm 0.1.0 (unreleased)
 
+- Fixed a resource leak on rejected native execution. A malformed
+  program is rejected by a validation helper deep inside graph
+  construction, and an R error unwinds past local cleanup, so both
+  native paths now own their transient GGML backend, graph contexts,
+  backend buffer and packed convolution plans through a protected
+  external pointer whose finalizer releases whatever was built.
+  Rejecting one malformed OpenSpliceAI program leaked 0.6 to 1.3 MB of
+  live allocation per call and now leaks none.
+
 - Added an internal fixed-shape F32 dataflow lowering for bound programs
   whose single input is a named `[channel, sequence, batch]` array. It
   retains one CPU backend, its graph context, backend buffer and input
