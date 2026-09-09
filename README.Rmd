@@ -259,10 +259,11 @@ recurrence across its three nested symbolic loops and agrees with direct R
 iteration. It is the semantic oracle for the native bound-program lowering,
 not a second GGUF runtime. Official ESM-2 and OpenSpliceAI checkpoints now
 cross complete dense numerical oracles through Rgguf. OpenSpliceAI also has an
-internal fixed-shape F32 lowering whose complete output agrees with that oracle
-and with upstream PyTorch within 5e-7; it stays unexported because it reaches
-only 24.2% of upstream CPU throughput. The ESM-2 native lowering remains
-explicit work. Evo still needs a checkpoint importer and numerical lowering,
+internal fixed-shape F32 lowering that agrees with upstream PyTorch on all four
+released MANE checkpoints and, on equal pinned cores, runs 1.6 to 1.9 times
+upstream's CPU throughput on the 400 nt and 2000 nt models. It stays unexported
+because its R API is a separate design question. The ESM-2 native lowering
+remains explicit work. Evo still needs a checkpoint importer and numerical lowering,
 while TRM still needs its full bidirectional-attention lowering. Those
 absences remain named operator failures instead of becoming architecture
 switches.

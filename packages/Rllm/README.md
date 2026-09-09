@@ -183,14 +183,18 @@ The complete 16-position output of the MANE 80 nt rs10 checkpoint agrees
 with upstream PyTorch within 5e-7. The generic GGML transformer lowerer
 rejects its floating-point sequence-input grammar explicitly. Its
 internal fixed-shape F32 CPU lowering retains mapped weights and its
-graph buffer. Each generic conv1d copies and packs its validated F32
-`[K, IC, OC]` weights and optional bias once, then uses a runtime-safe
-scalar or x86 AVX2/FMA direct kernel; CUDA retains the official im2col
-graph. On the i5-13500, the exact 80 nt checkpoint at `[4, 181, 128]`
-reached 2,018.3 samples/s, or 1,009.1 ref-plus-alt variants/s because
-each variant consumes two samples. This is 2.68 times the prior
-persistent CPU path but only 24.2% of upstream PyTorch’s 4,178
-variants/s, so it remains an internal execution surface. FASTA slicing,
+graph buffer. Each generic conv1d packs its validated F32 `[K, IC, OC]`
+weights once, gathers each input channel window once per work item, and
+absorbs a preceding normalization and leaky rectification into that
+gather; workers claim output tiles from a shared counter rather than
+taking a fixed share. CUDA retains the official im2col graph. All four
+released MANE checkpoints agree with upstream PyTorch: 5e-7 at 80 nt,
+6.0e-8 at 400 nt and 2000 nt, and 1.5e-15 at 10000 nt. With both pinned
+to the same four idle performance cores of an i5-13500, four threads
+each, this lowering runs 1.61 to 1.92 times upstream’s throughput at 400
+nt and 2000 nt, 1.36 times at 10000 nt, and between 0.77 and 1.09 times
+at 80 nt, where per-node launch cost still dominates. It stays internal
+because its R API is a separate design question. FASTA slicing,
 annotation overlap, allele construction, and DS/DP reduction remain
 outside the model boundary.
 

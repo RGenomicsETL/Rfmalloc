@@ -15,11 +15,15 @@
   convolution that cannot take the fusion, and every device graph, still emits
   the operators as before.
 
-- The native F32 CPU lowering now uses Rggml's worker-split leaky ReLU and its
-  retiled convolution kernel. On the i5-13500 the real MANE 400 nt
-  OpenSpliceAI checkpoint at `[4, 416, 128]` went from 260.1 ms to 59.5 ms per
-  batch, which is 2,151 samples/s against upstream PyTorch's best 1,482 on the
-  same machine and input, and the pinned 80 nt outputs are unchanged.
+- The native F32 CPU lowering now uses Rggml's worker-split leaky ReLU, its
+  retiled convolution kernel and the folded gather. On the i5-13500 the real
+  MANE 400 nt OpenSpliceAI checkpoint at `[4, 416, 128]` went from 260.1 ms to
+  41.6 ms per batch. With both implementations pinned to the same four idle
+  performance cores, four threads each, it runs 1.61x upstream PyTorch at
+  400 nt and batch 128, 1.92x at 400 nt and batch 32, 1.89x at 2000 nt, 1.36x
+  at 10000 nt, and 0.77x to 1.09x at 80 nt, where per-node launch cost still
+  dominates. All four released MANE checkpoints agree with upstream PyTorch:
+  5e-7 at 80 nt, 6.0e-8 at 400 nt and 2000 nt, 1.5e-15 at 10000 nt.
 
 - Fixed a resource leak on rejected native execution. A malformed program is
   rejected by a validation helper deep inside graph construction, and an R
